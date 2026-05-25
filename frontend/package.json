@@ -1,0 +1,26 @@
+{
+  "name": "code-review-dashboard-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@vscode/codicons": "^0.0.36",
+    "monaco-editor": "^0.53.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
+  }
+}

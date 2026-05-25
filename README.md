@@ -28,6 +28,16 @@ Then open `http://<machine-ip>:8765` from another device on the same private net
 
 The app is strictly read-only. It shows a repository file tree, color-codes changed/new/deleted files and folders, and runs read-only Git commands such as `git status`, `git diff`, `git show`, `git ls-files`, and `git rev-parse`.
 
+## Frontend Development
+
+The browser UI is a Vite/React/TypeScript app in `frontend/`. The production build is written into `src/git_review_dashboard/static/` so the Python package can serve it without a separate Node process.
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
 ## Options
 
 ```bash

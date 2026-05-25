@@ -25,6 +25,26 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
 TEXT_LIMIT_BYTES = 1_500_000
 
+LANGUAGE_BY_EXTENSION = {
+    ".css": "css",
+    ".go": "go",
+    ".html": "html",
+    ".java": "java",
+    ".js": "javascript",
+    ".json": "json",
+    ".jsx": "javascript",
+    ".md": "markdown",
+    ".py": "python",
+    ".rs": "rust",
+    ".sh": "shell",
+    ".toml": "toml",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".xml": "xml",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+}
+
 
 class DashboardError(Exception):
     status = HTTPStatus.BAD_REQUEST
@@ -252,26 +272,37 @@ def repo_state(repo: Path) -> dict[str, Any]:
 
 
 def read_text_file(repo: Path, rel_path: str) -> tuple[list[str], bool]:
+    text, binary = read_text_blob(repo, rel_path)
+    return text.splitlines(), binary
+
+
+def read_text_blob(repo: Path, rel_path: str) -> tuple[str, bool]:
     disk_path = path_on_disk(repo, rel_path)
     try:
         data = disk_path.read_bytes()
     except FileNotFoundError as exc:
         raise NotFoundError(f"{rel_path} does not exist in the working tree.") from exc
+    return decode_text_blob(data, rel_path)
+
+
+def decode_text_blob(data: bytes, rel_path: str) -> tuple[str, bool]:
     if b"\x00" in data:
-        return [], True
+        return "", True
     if len(data) > TEXT_LIMIT_BYTES:
         raise DashboardError(f"{rel_path} is larger than the {TEXT_LIMIT_BYTES} byte display limit.")
-    return data.decode("utf-8", "replace").splitlines(), False
+    return data.decode("utf-8", "replace"), False
 
 
 def read_head_text(repo: Path, rel_path: str) -> tuple[list[str], bool]:
+    text, binary = read_head_text_blob(repo, rel_path)
+    return text.splitlines(), binary
+
+
+def read_head_text_blob(repo: Path, rel_path: str) -> tuple[str, bool]:
     proc = run_git(repo, "show", f"HEAD:{rel_path}", check=False)
     if proc.returncode != 0:
-        return [], False
-    data = proc.stdout
-    if b"\x00" in data:
-        return [], True
-    return data.decode("utf-8", "replace").splitlines(), False
+        return "", False
+    return decode_text_blob(proc.stdout, rel_path)
 
 
 def get_status_for_path(repo: Path, rel_path: str) -> FileStatus | None:
@@ -412,6 +443,19 @@ def build_full_lines(repo: Path, rel_path: str, status: FileStatus | None) -> tu
     return output, False
 
 
+def editor_text_from_lines(lines: list[dict[str, Any]]) -> str:
+    return "\n".join(line["text"] for line in lines)
+
+
+def language_for_path(rel_path: str) -> str:
+    suffix = Path(rel_path).suffix.lower()
+    if suffix in LANGUAGE_BY_EXTENSION:
+        return LANGUAGE_BY_EXTENSION[suffix]
+    if Path(rel_path).name in {"Dockerfile", "Containerfile"}:
+        return "dockerfile"
+    return "plaintext"
+
+
 def file_payload(repo: Path, raw_path: str) -> dict[str, Any]:
     rel_path = normalize_repo_path(raw_path)
     status = get_status_for_path(repo, rel_path)
@@ -420,11 +464,24 @@ def file_payload(repo: Path, raw_path: str) -> dict[str, Any]:
 
     diff_text = unified_diff_for_file(repo, rel_path, status, context=3)
     full_lines, binary = build_full_lines(repo, rel_path, status)
+    original_content, original_binary = read_head_text_blob(repo, rel_path)
+
+    if status and status.category == "deleted":
+        current_content = ""
+    elif binary:
+        current_content = ""
+    else:
+        current_content, _ = read_text_blob(repo, rel_path)
+
     return {
         "path": rel_path,
         "status": status.__dict__ if status else {"category": "clean", "label": "Clean", "xy": "  "},
-        "binary": binary,
+        "binary": binary or original_binary,
+        "language": language_for_path(rel_path),
         "fullLines": full_lines,
+        "reviewContent": "" if binary else editor_text_from_lines(full_lines),
+        "currentContent": current_content,
+        "originalContent": "" if original_binary else original_content,
         "diff": diff_text,
     }
 
@@ -438,6 +495,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         sys.stderr.write("%s - %s\n" % (self.log_date_time_string(), format % args))
+
+    def end_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
