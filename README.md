@@ -1,6 +1,17 @@
-# Code Review Dashboard
+# 🔎 Code Review Dashboard
 
 A small read-only web dashboard for browsing a Git repository and reviewing uncommitted changes from a phone or tablet.
+
+<table>
+  <tr>
+    <td><img src="docs/assets/mobile-explorer.png" alt="Mobile repository explorer" width="300"></td>
+    <td><img src="docs/assets/mobile-changes.png" alt="Mobile changes-only file view" width="300"></td>
+  </tr>
+  <tr>
+    <td align="center">Repository explorer</td>
+    <td align="center">Changes-only file review</td>
+  </tr>
+</table>
 
 ## Install
 
