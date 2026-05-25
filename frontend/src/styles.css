@@ -347,35 +347,74 @@ h2 {
   font-size: 56px;
 }
 
-.line-added {
+.code-view {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 20px;
+  tab-size: 2;
+  user-select: text;
+  -webkit-user-select: text;
+  touch-action: pan-x pan-y;
+}
+
+.code-line {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  min-width: max-content;
+  border-left: 3px solid transparent;
+}
+
+.line-number {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  padding: 0 8px 0 4px;
+  background: inherit;
+  color: #6e7681;
+  text-align: right;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.line-text {
+  display: block;
+  padding: 0 14px 0 8px;
+  white-space: pre;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.code-line.added,
+.code-line.diff-added {
   background: var(--add-bg);
+  border-left-color: var(--green);
 }
 
-.line-deleted {
+.code-line.deleted,
+.code-line.diff-deleted {
   background: var(--del-bg);
+  border-left-color: var(--red);
 }
 
-.line-modified {
+.code-line.modified {
   background: var(--mod-bg);
+  border-left-color: var(--yellow);
 }
 
-.gutter-added {
-  border-left: 3px solid var(--green);
+.code-line.diff-hunk {
+  background: rgba(55, 148, 255, 0.16);
+  border-left-color: var(--blue);
+  color: #9cdcfe;
 }
 
-.gutter-deleted {
-  border-left: 3px solid var(--red);
-}
-
-.gutter-modified {
-  border-left: 3px solid var(--yellow);
-}
-
-.monaco-editor,
-.monaco-diff-editor,
-.monaco-editor-background,
-.monaco-diff-editor .editor {
-  background-color: var(--bg) !important;
+.code-line.diff-meta {
+  color: var(--muted);
 }
 
 @media (min-width: 900px) {
@@ -404,4 +443,52 @@ h2 {
   .segmented {
     grid-column: auto;
   }
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-name,
+.hljs-tag {
+  color: #569cd6;
+}
+
+.hljs-string,
+.hljs-title,
+.hljs-section,
+.hljs-attribute,
+.hljs-literal,
+.hljs-template-tag,
+.hljs-template-variable {
+  color: #ce9178;
+}
+
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet {
+  color: #b5cea8;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #6a9955;
+  font-style: italic;
+}
+
+.hljs-variable,
+.hljs-params,
+.hljs-class .hljs-title,
+.hljs-type {
+  color: #4ec9b0;
+}
+
+.hljs-function,
+.hljs-property,
+.hljs-attr {
+  color: #dcdcaa;
+}
+
+.diff-prefix {
+  user-select: text;
+  -webkit-user-select: text;
 }

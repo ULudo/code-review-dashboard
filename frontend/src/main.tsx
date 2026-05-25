@@ -1,9 +1,21 @@
 import "@vscode/codicons/dist/codicon.css";
 import "./styles.css";
 
-import Editor, { DiffEditor, type Monaco } from "@monaco-editor/react";
-import * as monacoTypes from "monaco-editor";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import hljs from "highlight.js/lib/core";
+import bash from "highlight.js/lib/languages/bash";
+import css from "highlight.js/lib/languages/css";
+import go from "highlight.js/lib/languages/go";
+import java from "highlight.js/lib/languages/java";
+import javascript from "highlight.js/lib/languages/javascript";
+import json from "highlight.js/lib/languages/json";
+import markdown from "highlight.js/lib/languages/markdown";
+import python from "highlight.js/lib/languages/python";
+import rust from "highlight.js/lib/languages/rust";
+import ini from "highlight.js/lib/languages/ini";
+import typescript from "highlight.js/lib/languages/typescript";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 type Category = "clean" | "modified" | "new" | "deleted";
@@ -61,36 +73,28 @@ type FilePayload = {
   diff: string;
 };
 
-const editorOptions: monacoTypes.editor.IStandaloneEditorConstructionOptions = {
-  readOnly: true,
-  minimap: { enabled: false },
-  fontSize: 13,
-  lineHeight: 20,
-  folding: false,
-  glyphMargin: false,
-  lineDecorationsWidth: 10,
-  lineNumbersMinChars: 4,
-  renderLineHighlight: "none",
-  scrollBeyondLastLine: false,
-  automaticLayout: true,
-  wordWrap: "off",
-  contextmenu: false,
+type DiffLine = {
+  number: number;
+  text: string;
+  kind: "meta" | "hunk" | "added" | "deleted" | "context";
 };
 
-const diffOptions: monacoTypes.editor.IStandaloneDiffEditorConstructionOptions = {
-  readOnly: true,
-  minimap: { enabled: false },
-  fontSize: 13,
-  lineHeight: 20,
-  renderSideBySide: false,
-  useInlineViewWhenSpaceIsLimited: true,
-  lineDecorationsWidth: 10,
-  lineNumbersMinChars: 4,
-  scrollBeyondLastLine: false,
-  automaticLayout: true,
-  wordWrap: "off",
-  contextmenu: false,
-};
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("css", css);
+hljs.registerLanguage("go", go);
+hljs.registerLanguage("html", xml);
+hljs.registerLanguage("ini", ini);
+hljs.registerLanguage("java", java);
+hljs.registerLanguage("javascript", javascript);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("markdown", markdown);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("rust", rust);
+hljs.registerLanguage("shell", bash);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("yaml", yaml);
+hljs.registerLanguage("yml", yaml);
 
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { cache: "no-store" });
@@ -144,9 +148,6 @@ function App() {
   const [mode, setMode] = useState<ViewMode>("full");
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string>("");
-  const monacoRef = useRef<Monaco | null>(null);
-  const editorRef = useRef<monacoTypes.editor.IStandaloneCodeEditor | null>(null);
-  const decorationsRef = useRef<monacoTypes.editor.IEditorDecorationsCollection | null>(null);
 
   const loadState = useCallback(async () => {
     try {
@@ -207,34 +208,6 @@ function App() {
     setSelectedFile(null);
     history.replaceState(null, "", location.pathname);
   };
-
-  const configureMonaco = (monaco: Monaco) => {
-    monacoRef.current = monaco;
-    monaco.editor.defineTheme("review-dark", {
-      base: "vs-dark",
-      inherit: true,
-      rules: [],
-      colors: {
-        "editor.background": "#1e1e1e",
-        "editorLineNumber.foreground": "#6e7681",
-        "editorGutter.background": "#1e1e1e",
-        "diffEditor.insertedTextBackground": "#14361f",
-        "diffEditor.removedTextBackground": "#3f1818",
-      },
-    });
-    monaco.editor.setTheme("review-dark");
-  };
-
-  const onEditorMount = (editor: monacoTypes.editor.IStandaloneCodeEditor, monaco: Monaco) => {
-    editorRef.current = editor;
-    if (!monacoRef.current) configureMonaco(monaco);
-    decorationsRef.current = editor.createDecorationsCollection();
-    applyLineDecorations(selectedFile, decorationsRef.current);
-  };
-
-  useEffect(() => {
-    if (editorRef.current) applyLineDecorations(selectedFile, decorationsRef.current);
-  }, [selectedFile, mode]);
 
   const isFileOpen = Boolean(selectedPath);
 
@@ -303,28 +276,9 @@ function App() {
             {selectedFile.binary ? (
               <div className="empty-state">Binary file; text preview is not available.</div>
             ) : mode === "changes" ? (
-              <DiffEditor
-                key={`diff-${selectedFile.path}`}
-                original={selectedFile.originalContent}
-                modified={selectedFile.currentContent}
-                language={selectedFile.language}
-                theme="review-dark"
-                beforeMount={configureMonaco}
-                options={diffOptions}
-              />
+              <DiffCodeView diff={selectedFile.diff} language={selectedFile.language} />
             ) : (
-              <Editor
-                key={`full-${selectedFile.path}`}
-                value={selectedFile.reviewContent}
-                language={selectedFile.language}
-                theme="review-dark"
-                beforeMount={configureMonaco}
-                onMount={onEditorMount}
-                options={{
-                  ...editorOptions,
-                  lineNumbers: (lineNumber) => displayLineNumber(selectedFile.fullLines, lineNumber),
-                }}
-              />
+              <FullCodeView lines={selectedFile.fullLines} language={selectedFile.language} />
             )}
           </>
         ) : (
@@ -336,6 +290,75 @@ function App() {
       </section>
     </main>
   );
+}
+
+function FullCodeView({ lines, language }: { lines: FullLine[]; language: string }) {
+  if (!lines.length) {
+    return <div className="empty-state">No text content to display.</div>;
+  }
+
+  return (
+    <pre className="code-view selectable-code" aria-label="Full file">
+      {lines.map((line, index) => (
+        <span className={`code-line ${line.kind}`} key={`${index}-${line.number ?? "old"}`}>
+          <span className="line-number" aria-hidden="true">{displayLineNumber(lines, index + 1)}</span>
+          <HighlightedCode text={line.text || " "} language={language} />
+        </span>
+      ))}
+    </pre>
+  );
+}
+
+function DiffCodeView({ diff, language }: { diff: string; language: string }) {
+  const lines = parseDiffLines(diff);
+  if (!lines.length) {
+    return <div className="empty-state">No changes for this file.</div>;
+  }
+
+  return (
+    <pre className="code-view selectable-code" aria-label="Changes only">
+      {lines.map((line) => (
+        <span className={`code-line diff-${line.kind}`} key={line.number}>
+          <span className="line-number" aria-hidden="true">{line.number}</span>
+          <HighlightedDiffCode line={line} language={language} />
+        </span>
+      ))}
+    </pre>
+  );
+}
+
+function HighlightedDiffCode({ line, language }: { line: DiffLine; language: string }) {
+  if (line.kind === "added" || line.kind === "deleted") {
+    const prefix = line.text.slice(0, 1);
+    const body = line.text.slice(1);
+    return (
+      <code className="line-text">
+        <span className="diff-prefix">{prefix}</span>
+        <HighlightedInline text={body || " "} language={language} />
+      </code>
+    );
+  }
+  if (line.kind === "context" && line.text.startsWith(" ")) {
+    return (
+      <code className="line-text">
+        <span className="diff-prefix"> </span>
+        <HighlightedInline text={line.text.slice(1) || " "} language={language} />
+      </code>
+    );
+  }
+  return <code className="line-text">{line.text || " "}</code>;
+}
+
+function HighlightedCode({ text, language }: { text: string; language: string }) {
+  return (
+    <code className="line-text">
+      <HighlightedInline text={text} language={language} />
+    </code>
+  );
+}
+
+function HighlightedInline({ text, language }: { text: string; language: string }) {
+  return <span dangerouslySetInnerHTML={{ __html: highlightLine(text, language) }} />;
 }
 
 function TreeItem({
@@ -388,22 +411,46 @@ function displayLineNumber(lines: FullLine[], lineNumber: number): string {
   return String(line.number);
 }
 
-function applyLineDecorations(file: FilePayload | null, collection: monacoTypes.editor.IEditorDecorationsCollection | null) {
-  if (!file || !collection) return;
-  const decorations = file.fullLines
+function highlightLine(text: string, language: string): string {
+  const normalized = normalizeHighlightLanguage(language);
+  try {
+    if (normalized && hljs.getLanguage(normalized)) {
+      return hljs.highlight(text, { language: normalized, ignoreIllegals: true }).value;
+    }
+  } catch {
+    // Fall back to escaped plain text if a grammar rejects the line.
+  }
+  return escapeHtml(text);
+}
+
+function normalizeHighlightLanguage(language: string): string {
+  if (language === "plaintext") return "";
+  if (language === "shell") return "bash";
+  if (language === "dockerfile") return "bash";
+  if (language === "toml") return "ini";
+  return language;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function parseDiffLines(diff: string): DiffLine[] {
+  return diff
+    .split("\n")
+    .filter((line) => line && !line.startsWith("diff --git") && !line.startsWith("index "))
     .map((line, index) => {
-      if (line.kind === "context") return null;
-      return {
-        range: new monacoTypes.Range(index + 1, 1, index + 1, 1),
-        options: {
-          isWholeLine: true,
-          className: `line-${line.kind}`,
-          linesDecorationsClassName: `gutter-${line.kind}`,
-        },
-      };
-    })
-    .filter(Boolean) as monacoTypes.editor.IModelDeltaDecoration[];
-  collection.set(decorations);
+      let kind: DiffLine["kind"] = "context";
+      if (line.startsWith("@@")) kind = "hunk";
+      else if (line.startsWith("+++") || line.startsWith("---")) kind = "meta";
+      else if (line.startsWith("+")) kind = "added";
+      else if (line.startsWith("-")) kind = "deleted";
+      return { number: index + 1, text: line, kind };
+    });
 }
 
 createRoot(document.getElementById("root")!).render(
