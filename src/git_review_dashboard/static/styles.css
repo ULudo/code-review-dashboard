@@ -158,59 +158,99 @@ h2 {
   border-top: 1px solid var(--line);
 }
 
-.file-row {
+.tree-node {
+  min-width: 0;
+}
+
+.tree-row {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: 18px 18px minmax(0, 1fr) auto;
   gap: 10px;
+  align-items: center;
   width: 100%;
-  padding: 12px;
+  min-height: 42px;
+  padding: 8px 10px 8px calc(10px + var(--depth) * 18px);
   border: 0;
   border-bottom: 1px solid var(--line);
   background: transparent;
   text-align: left;
 }
 
-.file-row.active {
+.tree-row.active {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
-.file-row:last-child {
-  border-bottom: 0;
+.tree-row.clean {
+  color: var(--text);
 }
 
-.badge {
-  min-width: 72px;
+.tree-row.modified .tree-name,
+.directory-row.modified .tree-name {
+  color: var(--modified-text);
+}
+
+.tree-row.new .tree-name,
+.directory-row.new .tree-name {
+  color: var(--added-text);
+}
+
+.tree-row.deleted .tree-name,
+.directory-row.deleted .tree-name {
+  color: var(--deleted-text);
+  text-decoration: line-through;
+}
+
+.twisty,
+.tree-icon {
+  color: var(--muted);
+  text-align: center;
+}
+
+.tree-name {
+  min-width: 0;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-badge {
+  max-width: 120px;
   padding: 4px 7px;
   border-radius: 8px;
   font-size: 12px;
   font-weight: 700;
   text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.badge.modified,
+.tree-badge.modified,
 .count.changed {
   background: var(--modified-bg);
   color: var(--modified-text);
 }
 
-.badge.new,
+.tree-badge.new,
 .count.new {
   background: var(--added-bg);
   color: var(--added-text);
 }
 
-.badge.deleted,
+.tree-badge.deleted,
 .count.deleted {
   background: var(--deleted-bg);
   color: var(--deleted-text);
 }
 
-.file-name {
-  min-width: 0;
-  overflow-wrap: anywhere;
+.old-path {
+  grid-column: 3 / -1;
+  color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.35;
+  font-size: 12px;
 }
 
 .viewer-panel {

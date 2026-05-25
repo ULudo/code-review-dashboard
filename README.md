@@ -1,6 +1,6 @@
 # Code Review Dashboard
 
-A small read-only web dashboard for reviewing uncommitted Git changes from a phone or tablet.
+A small read-only web dashboard for browsing a Git repository and reviewing uncommitted changes from a phone or tablet.
 
 ## Install
 
@@ -26,7 +26,7 @@ git-review-dashboard --host 0.0.0.0 --port 8765
 
 Then open `http://<machine-ip>:8765` from another device on the same private network or VPN.
 
-The app is strictly read-only. It reads files and runs read-only Git commands such as `git status`, `git diff`, `git show`, and `git rev-parse`.
+The app is strictly read-only. It shows a repository file tree, color-codes changed/new/deleted files and folders, and runs read-only Git commands such as `git status`, `git diff`, `git show`, `git ls-files`, and `git rev-parse`.
 
 ## Options
 

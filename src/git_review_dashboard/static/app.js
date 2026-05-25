@@ -1,9 +1,11 @@
 const state = {
   repo: null,
   files: [],
+  tree: null,
   selectedPath: null,
   selectedFile: null,
   mode: "full",
+  collapsed: new Set(),
 };
 
 const els = {
@@ -26,7 +28,7 @@ const els = {
 };
 
 function escapeHtml(value) {
-  return value
+  return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -45,48 +47,83 @@ async function fetchJson(url) {
 async function loadState() {
   const payload = await fetchJson("/api/state");
   state.repo = payload.repo;
-  state.files = payload.files;
+  state.files = payload.files || [];
+  state.tree = payload.tree;
   renderState(payload);
 
-  if (state.selectedPath && state.files.some((file) => file.path === state.selectedPath)) {
+  const visibleSelected = state.selectedPath && state.files.some((file) => file.path === state.selectedPath);
+  if (visibleSelected) {
     await openFile(state.selectedPath, false);
   } else if (state.files.length) {
     await openFile(state.files[0].path, false);
   } else {
     state.selectedPath = null;
     state.selectedFile = null;
-    showEmpty("No uncommitted changes found.");
+    showEmpty("No files found in this repository.");
   }
 }
 
 function renderState(payload) {
   els.repoPath.textContent = payload.repo;
   els.branchName.textContent = payload.branch ? `Branch ${payload.branch}` : "";
-  els.summaryText.textContent = `${payload.counts.total} file${payload.counts.total === 1 ? "" : "s"}`;
+  const allCount = payload.counts.all ?? payload.files.length;
+  els.summaryText.textContent = `${allCount} file${allCount === 1 ? "" : "s"} - ${payload.counts.total} changed`;
   els.changedCount.textContent = payload.counts.changed;
   els.newCount.textContent = payload.counts.new;
   els.deletedCount.textContent = payload.counts.deleted;
 
-  if (!payload.files.length) {
-    els.fileList.innerHTML = '<div class="empty-state">Working tree is clean.</div>';
+  if (!payload.tree || !payload.tree.children.length) {
+    els.fileList.innerHTML = '<div class="empty-state">No files found.</div>';
     return;
   }
 
-  els.fileList.innerHTML = payload.files
-    .map((file) => {
-      const active = file.path === state.selectedPath ? " active" : "";
-      const oldPath = file.old_path ? `<div class="file-name">from ${escapeHtml(file.old_path)}</div>` : "";
-      return `
-        <button class="file-row${active}" type="button" data-path="${escapeHtml(file.path)}">
-          <span class="badge ${escapeHtml(file.category)}">${escapeHtml(file.label)}</span>
-          <span>
-            <span class="file-name">${escapeHtml(file.path)}</span>
-            ${oldPath}
-          </span>
-        </button>
-      `;
+  els.fileList.innerHTML = renderTree(payload.tree.children, 0);
+  renderFileListSelection();
+}
+
+function renderTree(nodes, depth) {
+  return nodes
+    .map((node) => {
+      if (node.type === "directory") {
+        return renderDirectory(node, depth);
+      }
+      return renderFileNode(node, depth);
     })
     .join("");
+}
+
+function renderDirectory(node, depth) {
+  const collapsed = state.collapsed.has(node.path);
+  const children = collapsed ? "" : renderTree(node.children || [], depth + 1);
+  const badge = node.category === "clean" ? "" : `<span class="tree-badge ${escapeHtml(node.category)}">${escapeHtml(node.label)}</span>`;
+  return `
+    <div class="tree-node">
+      <button class="tree-row directory-row ${escapeHtml(node.category)}" type="button" data-folder="${escapeHtml(node.path)}" style="--depth: ${depth}">
+        <span class="twisty">${collapsed ? ">" : "v"}</span>
+        <span class="tree-icon">[]</span>
+        <span class="tree-name">${escapeHtml(node.name)}</span>
+        ${badge}
+      </button>
+      <div class="tree-children${collapsed ? " hidden" : ""}">
+        ${children}
+      </div>
+    </div>
+  `;
+}
+
+function renderFileNode(node, depth) {
+  const active = node.path === state.selectedPath ? " active" : "";
+  const badge = node.category === "clean" ? "" : `<span class="tree-badge ${escapeHtml(node.category)}">${escapeHtml(node.label)}</span>`;
+  const oldPath = node.old_path ? `<span class="old-path">from ${escapeHtml(node.old_path)}</span>` : "";
+  return `
+    <button class="tree-row file-row ${escapeHtml(node.category)}${active}" type="button" data-path="${escapeHtml(node.path)}" style="--depth: ${depth}">
+      <span class="twisty"></span>
+      <span class="tree-icon">-</span>
+      <span class="tree-name">${escapeHtml(node.name)}</span>
+      ${badge}
+      ${oldPath}
+    </button>
+  `;
 }
 
 async function openFile(path, updateHash = true) {
@@ -153,7 +190,7 @@ function renderFull(lines) {
 
   els.codeView.innerHTML = lines
     .map((line) => {
-      const number = line.number === null || line.number === undefined ? "−" : line.number;
+      const number = line.number === null || line.number === undefined ? "-" : line.number;
       const classes = ["code-line", line.kind || "context"];
       if (line.virtual) classes.push("virtual");
       return `
@@ -186,6 +223,18 @@ function renderDiff(diff) {
 }
 
 els.fileList.addEventListener("click", (event) => {
+  const folder = event.target.closest("[data-folder]");
+  if (folder) {
+    const path = folder.dataset.folder;
+    if (state.collapsed.has(path)) {
+      state.collapsed.delete(path);
+    } else {
+      state.collapsed.add(path);
+    }
+    renderState({ repo: state.repo, files: state.files, tree: state.tree, counts: currentCounts(), branch: els.branchName.textContent.replace(/^Branch /, "") });
+    return;
+  }
+
   const row = event.target.closest(".file-row");
   if (!row) return;
   openFile(row.dataset.path).catch(showError);
@@ -206,6 +255,16 @@ els.diffModeButton.addEventListener("click", () => {
   renderModeButtons();
   renderCode();
 });
+
+function currentCounts() {
+  return {
+    changed: Number(els.changedCount.textContent) || 0,
+    new: Number(els.newCount.textContent) || 0,
+    deleted: Number(els.deletedCount.textContent) || 0,
+    total: state.files.filter((file) => file.category !== "clean").length,
+    all: state.files.length,
+  };
+}
 
 function showError(error) {
   showEmpty(error.message || String(error));

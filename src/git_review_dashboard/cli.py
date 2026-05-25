@@ -149,19 +149,105 @@ def classify_status(path: str, xy: str, old_path: str | None = None) -> FileStat
     return FileStatus(path=path, xy=xy, category="modified", label="Modified", old_path=old_path)
 
 
+def all_repo_paths(repo: Path, changed_files: list[FileStatus]) -> list[str]:
+    proc = run_git(repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    paths = {decode_git(path) for path in proc.stdout.split(b"\0") if path}
+    paths.update(item.path for item in changed_files)
+    return sorted(paths, key=lambda path: path.lower())
+
+
+def clean_file(path: str) -> dict[str, Any]:
+    return {"path": path, "xy": "  ", "category": "clean", "label": "Clean", "old_path": None}
+
+
+def status_priority(category: str) -> int:
+    return {"deleted": 3, "new": 2, "modified": 1, "clean": 0}.get(category, 0)
+
+
+def directory_status(children: dict[str, dict[str, Any]]) -> tuple[str, str]:
+    category = "clean"
+    for child in children.values():
+        child_category = child.get("category", "clean")
+        if status_priority(child_category) > status_priority(category):
+            category = child_category
+    label = {"deleted": "Deleted inside", "new": "New inside", "modified": "Changed inside", "clean": "Clean"}[category]
+    return category, label
+
+
+def build_tree(paths: list[str], status_by_path: dict[str, FileStatus]) -> dict[str, Any]:
+    root: dict[str, Any] = {
+        "name": "",
+        "path": "",
+        "type": "directory",
+        "category": "clean",
+        "label": "Clean",
+        "children": {},
+    }
+
+    for path in paths:
+        parts = path.split("/")
+        current = root
+        for index, part in enumerate(parts):
+            current_path = "/".join(parts[: index + 1])
+            is_file = index == len(parts) - 1
+            children = current["children"]
+            if part not in children:
+                children[part] = {
+                    "name": part,
+                    "path": current_path,
+                    "type": "file" if is_file else "directory",
+                    "category": "clean",
+                    "label": "Clean",
+                    "xy": "  ",
+                    "old_path": None,
+                    "children": {},
+                }
+            current = children[part]
+
+        status = status_by_path.get(path)
+        if status:
+            current.update(status.__dict__)
+            current["type"] = "file"
+            current["name"] = parts[-1]
+        else:
+            current.update(clean_file(path))
+            current["type"] = "file"
+            current["name"] = parts[-1]
+
+    def finalize(node: dict[str, Any]) -> dict[str, Any]:
+        if node["type"] == "file":
+            node.pop("children", None)
+            return node
+
+        finalized_children = [finalize(child) for child in node["children"].values()]
+        finalized_children.sort(key=lambda child: (child["type"] == "file", child["name"].lower()))
+        node["children"] = finalized_children
+        node["category"], node["label"] = directory_status({child["name"]: child for child in finalized_children})
+        node["xy"] = ""
+        node["old_path"] = None
+        return node
+
+    return finalize(root)
+
+
 def repo_state(repo: Path) -> dict[str, Any]:
-    files = parse_status(repo)
+    changed_files = parse_status(repo)
+    status_by_path = {item.path: item for item in changed_files}
+    paths = all_repo_paths(repo, changed_files)
+    files = [status_by_path[path].__dict__ if path in status_by_path else clean_file(path) for path in paths]
     return {
         "repo": str(repo),
         "branch": current_branch(repo),
         "hasHead": has_head(repo),
         "counts": {
-            "changed": sum(1 for item in files if item.category == "modified"),
-            "new": sum(1 for item in files if item.category == "new"),
-            "deleted": sum(1 for item in files if item.category == "deleted"),
-            "total": len(files),
+            "changed": sum(1 for item in changed_files if item.category == "modified"),
+            "new": sum(1 for item in changed_files if item.category == "new"),
+            "deleted": sum(1 for item in changed_files if item.category == "deleted"),
+            "total": len(changed_files),
+            "all": len(files),
         },
-        "files": [item.__dict__ for item in files],
+        "tree": build_tree(paths, status_by_path),
+        "files": files,
     }
 
 
