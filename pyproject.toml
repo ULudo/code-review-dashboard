@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "code-review-dashboard"
+version = "0.1.0"
+description = "A read-only mobile-first web dashboard for reviewing local Git changes."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Uli" }]
+dependencies = []
+
+[project.scripts]
+git-review-dashboard = "git_review_dashboard.cli:main"
+code-review-dashboard = "git_review_dashboard.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/git_review_dashboard"]

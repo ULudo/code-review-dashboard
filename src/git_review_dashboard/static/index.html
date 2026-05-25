@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Git Review Dashboard</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Git Review</p>
+        <h1 id="repoPath">Loading...</h1>
+      </div>
+      <button id="refreshButton" class="icon-button" type="button" title="Refresh" aria-label="Refresh">↻</button>
+    </header>
+
+    <main class="layout">
+      <section class="panel file-list-panel" aria-label="Changed files">
+        <div class="repo-meta">
+          <span id="branchName"></span>
+          <span id="summaryText"></span>
+        </div>
+        <div class="counts" aria-label="Change counts">
+          <span class="count changed"><strong id="changedCount">0</strong> changed</span>
+          <span class="count new"><strong id="newCount">0</strong> new</span>
+          <span class="count deleted"><strong id="deletedCount">0</strong> deleted</span>
+        </div>
+        <div id="fileList" class="file-list"></div>
+      </section>
+
+      <section class="panel viewer-panel" aria-label="File viewer">
+        <div id="emptyState" class="empty-state">
+          Select a file to review its current contents and Git diff.
+        </div>
+
+        <div id="fileViewer" class="file-viewer hidden">
+          <div class="viewer-header">
+            <div>
+              <p id="statusLabel" class="status-label"></p>
+              <h2 id="filePath"></h2>
+            </div>
+            <div class="mode-toggle" role="group" aria-label="View mode">
+              <button id="fullModeButton" type="button" class="active">Full file</button>
+              <button id="diffModeButton" type="button">Changes only</button>
+            </div>
+          </div>
+          <div id="message" class="message hidden"></div>
+          <pre id="codeView" class="code-view" aria-label="Code"></pre>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

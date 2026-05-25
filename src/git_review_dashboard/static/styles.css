@@ -1,0 +1,364 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f8;
+  --panel: #ffffff;
+  --text: #1f2328;
+  --muted: #667085;
+  --line: #d0d7de;
+  --accent: #2563eb;
+  --added-bg: #dafbe1;
+  --added-text: #116329;
+  --deleted-bg: #ffebe9;
+  --deleted-text: #82071e;
+  --modified-bg: #fff1c2;
+  --modified-text: #6f4e00;
+  --code-bg: #ffffff;
+  --shadow: 0 1px 4px rgb(16 24 40 / 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --line: #30363d;
+    --accent: #58a6ff;
+    --added-bg: #12361f;
+    --added-text: #7ee787;
+    --deleted-bg: #3b1518;
+    --deleted-text: #ffa198;
+    --modified-bg: #3b2f10;
+    --modified-text: #f2cc60;
+    --code-bg: #0d1117;
+    --shadow: none;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px;
+}
+
+button {
+  color: inherit;
+  font: inherit;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 72px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(12px);
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+h1,
+h2 {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  letter-spacing: 0;
+}
+
+h1 {
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+h2 {
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.icon-button {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 22px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  padding: 12px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.file-list-panel {
+  overflow: hidden;
+}
+
+.repo-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 12px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px;
+}
+
+.count {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.count strong {
+  display: block;
+  color: var(--text);
+  font-size: 18px;
+}
+
+.file-list {
+  border-top: 1px solid var(--line);
+}
+
+.file-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+}
+
+.file-row.active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.file-row:last-child {
+  border-bottom: 0;
+}
+
+.badge {
+  min-width: 72px;
+  padding: 4px 7px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.badge.modified,
+.count.changed {
+  background: var(--modified-bg);
+  color: var(--modified-text);
+}
+
+.badge.new,
+.count.new {
+  background: var(--added-bg);
+  color: var(--added-text);
+}
+
+.badge.deleted,
+.count.deleted {
+  background: var(--deleted-bg);
+  color: var(--deleted-text);
+}
+
+.file-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.viewer-panel {
+  min-height: 50vh;
+  overflow: hidden;
+}
+
+.empty-state {
+  padding: 32px 18px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.viewer-header {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.status-label {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.mode-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mode-toggle button {
+  min-height: 42px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.mode-toggle button + button {
+  border-left: 1px solid var(--line);
+}
+
+.mode-toggle button.active {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.message {
+  margin: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.code-view {
+  margin: 0;
+  min-height: 320px;
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  background: var(--code-bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+.code-line {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  min-width: max-content;
+  border-left: 3px solid transparent;
+}
+
+.line-number {
+  position: sticky;
+  left: 0;
+  padding: 0 8px;
+  background: inherit;
+  color: var(--muted);
+  text-align: right;
+  user-select: none;
+}
+
+.line-text {
+  padding: 0 12px 0 8px;
+  white-space: pre;
+}
+
+.code-line.added,
+.diff-added {
+  background: var(--added-bg);
+  color: var(--added-text);
+  border-left-color: var(--added-text);
+}
+
+.code-line.deleted,
+.diff-deleted {
+  background: var(--deleted-bg);
+  color: var(--deleted-text);
+  border-left-color: var(--deleted-text);
+}
+
+.code-line.modified {
+  background: var(--modified-bg);
+  color: var(--modified-text);
+  border-left-color: var(--modified-text);
+}
+
+.code-line.meta,
+.diff-meta {
+  color: var(--muted);
+}
+
+.code-line.hunk,
+.diff-hunk {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+}
+
+@media (min-width: 900px) {
+  .layout {
+    grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .file-list-panel,
+  .viewer-panel {
+    max-height: calc(100vh - 96px);
+    overflow: auto;
+  }
+
+  .code-view {
+    max-height: calc(100vh - 184px);
+  }
+
+  .viewer-header {
+    grid-template-columns: minmax(0, 1fr) 280px;
+    align-items: end;
+  }
+}
