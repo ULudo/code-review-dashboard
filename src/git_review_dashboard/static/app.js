@@ -1,6 +1,8 @@
 const state = {
-  repo: null,
+  branch: "",
+  counts: { changed: 0, new: 0, deleted: 0, total: 0, all: 0 },
   files: [],
+  repo: "",
   tree: null,
   selectedPath: null,
   selectedFile: null,
@@ -9,6 +11,8 @@ const state = {
 };
 
 const els = {
+  explorerScreen: document.querySelector("#explorerScreen"),
+  fileScreen: document.querySelector("#fileScreen"),
   repoPath: document.querySelector("#repoPath"),
   branchName: document.querySelector("#branchName"),
   summaryText: document.querySelector("#summaryText"),
@@ -17,8 +21,7 @@ const els = {
   deletedCount: document.querySelector("#deletedCount"),
   fileList: document.querySelector("#fileList"),
   refreshButton: document.querySelector("#refreshButton"),
-  emptyState: document.querySelector("#emptyState"),
-  fileViewer: document.querySelector("#fileViewer"),
+  backButton: document.querySelector("#backButton"),
   filePath: document.querySelector("#filePath"),
   statusLabel: document.querySelector("#statusLabel"),
   fullModeButton: document.querySelector("#fullModeButton"),
@@ -47,114 +50,117 @@ async function fetchJson(url) {
 async function loadState() {
   const payload = await fetchJson("/api/state");
   state.repo = payload.repo;
+  state.branch = payload.branch || "";
+  state.counts = payload.counts || state.counts;
   state.files = payload.files || [];
   state.tree = payload.tree;
-  renderState(payload);
+  renderExplorer();
 
-  const visibleSelected = state.selectedPath && state.files.some((file) => file.path === state.selectedPath);
-  if (visibleSelected) {
+  if (state.selectedPath && state.files.some((file) => file.path === state.selectedPath)) {
     await openFile(state.selectedPath, false);
-  } else if (state.files.length) {
-    await openFile(state.files[0].path, false);
   } else {
-    state.selectedPath = null;
-    state.selectedFile = null;
-    showEmpty("No files found in this repository.");
+    showExplorer();
   }
 }
 
-function renderState(payload) {
-  els.repoPath.textContent = payload.repo;
-  els.branchName.textContent = payload.branch ? `Branch ${payload.branch}` : "";
-  const allCount = payload.counts.all ?? payload.files.length;
-  els.summaryText.textContent = `${allCount} file${allCount === 1 ? "" : "s"} - ${payload.counts.total} changed`;
-  els.changedCount.textContent = payload.counts.changed;
-  els.newCount.textContent = payload.counts.new;
-  els.deletedCount.textContent = payload.counts.deleted;
+function renderExplorer() {
+  els.repoPath.textContent = basename(state.repo) || state.repo;
+  els.branchName.textContent = state.branch ? state.branch : "";
+  els.summaryText.textContent = `${state.counts.all || 0} files, ${state.counts.total || 0} changed`;
+  els.changedCount.textContent = state.counts.changed || 0;
+  els.newCount.textContent = state.counts.new || 0;
+  els.deletedCount.textContent = state.counts.deleted || 0;
 
-  if (!payload.tree || !payload.tree.children.length) {
+  if (!state.tree || !state.tree.children.length) {
     els.fileList.innerHTML = '<div class="empty-state">No files found.</div>';
     return;
   }
 
-  els.fileList.innerHTML = renderTree(payload.tree.children, 0);
-  renderFileListSelection();
+  els.fileList.innerHTML = renderTree(state.tree.children, 0);
+  renderSelection();
+}
+
+function basename(path) {
+  return String(path).split("/").filter(Boolean).pop() || "";
 }
 
 function renderTree(nodes, depth) {
-  return nodes
-    .map((node) => {
-      if (node.type === "directory") {
-        return renderDirectory(node, depth);
-      }
-      return renderFileNode(node, depth);
-    })
-    .join("");
+  return nodes.map((node) => (node.type === "directory" ? renderDirectory(node, depth) : renderFile(node, depth))).join("");
 }
 
 function renderDirectory(node, depth) {
   const collapsed = state.collapsed.has(node.path);
-  const children = collapsed ? "" : renderTree(node.children || [], depth + 1);
-  const badge = node.category === "clean" ? "" : `<span class="tree-badge ${escapeHtml(node.category)}">${escapeHtml(node.label)}</span>`;
+  const status = statusLetter(node);
   return `
     <div class="tree-node">
       <button class="tree-row directory-row ${escapeHtml(node.category)}" type="button" data-folder="${escapeHtml(node.path)}" style="--depth: ${depth}">
-        <span class="twisty">${collapsed ? ">" : "v"}</span>
-        <span class="tree-icon">[]</span>
+        <span class="tree-chevron">${collapsed ? ">" : "v"}</span>
         <span class="tree-name">${escapeHtml(node.name)}</span>
-        ${badge}
+        <span class="tree-status">${status}</span>
       </button>
       <div class="tree-children${collapsed ? " hidden" : ""}">
-        ${children}
+        ${collapsed ? "" : renderTree(node.children || [], depth + 1)}
       </div>
     </div>
   `;
 }
 
-function renderFileNode(node, depth) {
+function renderFile(node, depth) {
   const active = node.path === state.selectedPath ? " active" : "";
-  const badge = node.category === "clean" ? "" : `<span class="tree-badge ${escapeHtml(node.category)}">${escapeHtml(node.label)}</span>`;
+  const status = statusLetter(node);
   const oldPath = node.old_path ? `<span class="old-path">from ${escapeHtml(node.old_path)}</span>` : "";
   return `
     <button class="tree-row file-row ${escapeHtml(node.category)}${active}" type="button" data-path="${escapeHtml(node.path)}" style="--depth: ${depth}">
-      <span class="twisty"></span>
-      <span class="tree-icon">-</span>
+      <span class="tree-chevron"></span>
       <span class="tree-name">${escapeHtml(node.name)}</span>
-      ${badge}
+      <span class="tree-status">${status}</span>
       ${oldPath}
     </button>
   `;
 }
 
+function statusLetter(node) {
+  if (node.category === "modified") return "M";
+  if (node.category === "new") return "A";
+  if (node.category === "deleted") return "D";
+  return "";
+}
+
 async function openFile(path, updateHash = true) {
   state.selectedPath = path;
-  state.mode = state.mode || "full";
-  renderFileListSelection();
+  renderSelection();
 
   const payload = await fetchJson(`/api/file?path=${encodeURIComponent(path)}`);
   state.selectedFile = payload;
-  els.emptyState.classList.add("hidden");
-  els.fileViewer.classList.remove("hidden");
   els.filePath.textContent = payload.path;
-  els.statusLabel.textContent = `${payload.status.label || "File"} ${payload.status.xy || ""}`;
+  els.statusLabel.textContent = `${payload.status.label || "Clean"} ${payload.status.xy || ""}`.trim();
   renderModeButtons();
   renderCode();
+  showFile();
 
   if (updateHash) {
     history.replaceState(null, "", `#${encodeURIComponent(path)}`);
   }
 }
 
-function renderFileListSelection() {
-  document.querySelectorAll(".file-row").forEach((row) => {
-    row.classList.toggle("active", row.dataset.path === state.selectedPath);
+function showExplorer() {
+  els.explorerScreen.classList.remove("hidden");
+  els.fileScreen.classList.add("hidden");
+}
+
+function showFile() {
+  els.explorerScreen.classList.add("hidden");
+  els.fileScreen.classList.remove("hidden");
+  requestAnimationFrame(() => {
+    els.codeView.scrollTop = 0;
+    els.codeView.scrollLeft = 0;
   });
 }
 
-function showEmpty(text) {
-  els.emptyState.textContent = text;
-  els.emptyState.classList.remove("hidden");
-  els.fileViewer.classList.add("hidden");
+function renderSelection() {
+  document.querySelectorAll(".file-row").forEach((row) => {
+    row.classList.toggle("active", row.dataset.path === state.selectedPath);
+  });
 }
 
 function renderModeButtons() {
@@ -164,9 +170,7 @@ function renderModeButtons() {
 
 function renderCode() {
   const file = state.selectedFile;
-  if (!file) {
-    return;
-  }
+  if (!file) return;
 
   if (file.binary) {
     els.message.textContent = "Binary file; text preview is not available.";
@@ -195,7 +199,7 @@ function renderFull(lines) {
       if (line.virtual) classes.push("virtual");
       return `
         <span class="${classes.join(" ")}">
-          <span class="line-number">${escapeHtml(String(number))}</span>
+          <span class="line-number">${escapeHtml(number)}</span>
           <span class="line-text">${escapeHtml(line.text)}</span>
         </span>
       `;
@@ -231,7 +235,7 @@ els.fileList.addEventListener("click", (event) => {
     } else {
       state.collapsed.add(path);
     }
-    renderState({ repo: state.repo, files: state.files, tree: state.tree, counts: currentCounts(), branch: els.branchName.textContent.replace(/^Branch /, "") });
+    renderExplorer();
     return;
   }
 
@@ -242,6 +246,11 @@ els.fileList.addEventListener("click", (event) => {
 
 els.refreshButton.addEventListener("click", () => {
   loadState().catch(showError);
+});
+
+els.backButton.addEventListener("click", () => {
+  history.replaceState(null, "", location.pathname);
+  showExplorer();
 });
 
 els.fullModeButton.addEventListener("click", () => {
@@ -256,18 +265,9 @@ els.diffModeButton.addEventListener("click", () => {
   renderCode();
 });
 
-function currentCounts() {
-  return {
-    changed: Number(els.changedCount.textContent) || 0,
-    new: Number(els.newCount.textContent) || 0,
-    deleted: Number(els.deletedCount.textContent) || 0,
-    total: state.files.filter((file) => file.category !== "clean").length,
-    all: state.files.length,
-  };
-}
-
 function showError(error) {
-  showEmpty(error.message || String(error));
+  els.fileList.innerHTML = `<div class="empty-state">${escapeHtml(error.message || String(error))}</div>`;
+  showExplorer();
 }
 
 function initialPathFromHash() {
