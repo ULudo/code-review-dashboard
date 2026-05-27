@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Uli" }]
-dependencies = []
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+]
 
 [project.scripts]
 git-review-dashboard = "git_review_dashboard.cli:main"

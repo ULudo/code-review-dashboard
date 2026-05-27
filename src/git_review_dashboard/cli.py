@@ -1,29 +1,41 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import difflib
-import json
+import fcntl
+import ipaddress
 import os
 import posixpath
+import pty
 import re
+import secrets
+import shutil
+import signal
 import socket
+import struct
 import subprocess
 import sys
-import threading
+import termios
 import webbrowser
 from dataclasses import dataclass
 from http import HTTPStatus
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import quote, unquote
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
 TEXT_LIMIT_BYTES = 1_500_000
+TOKEN_COOKIE = "code_review_dashboard_token"
+SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 
 LANGUAGE_BY_EXTENSION = {
     ".css": "css",
@@ -486,68 +498,318 @@ def file_payload(repo: Path, raw_path: str) -> dict[str, Any]:
     }
 
 
-class DashboardHandler(SimpleHTTPRequestHandler):
-    server: "DashboardServer"
+def tmux_command(*args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    if shutil.which("tmux") is None:
+        raise DashboardError("tmux is not installed or not available on PATH.")
+    return subprocess.run(
+        ["tmux", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=check,
+    )
 
-    def __init__(self, *args: Any, directory: str | None = None, **kwargs: Any) -> None:
-        static_dir = resources.files("git_review_dashboard").joinpath("static")
-        super().__init__(*args, directory=str(static_dir), **kwargs)
 
-    def log_message(self, format: str, *args: Any) -> None:
-        sys.stderr.write("%s - %s\n" % (self.log_date_time_string(), format % args))
+def validate_session_name(name: str) -> str:
+    name = name.strip()
+    if not SESSION_NAME_RE.fullmatch(name):
+        raise DashboardError("Session name must be 1-80 characters: letters, numbers, _, ., :, or -.")
+    return name
 
-    def end_headers(self) -> None:
-        self.send_header("Cache-Control", "no-store")
-        super().end_headers()
 
-    def do_GET(self) -> None:
-        parsed = urlparse(self.path)
+def list_tmux_sessions() -> list[dict[str, Any]]:
+    proc = tmux_command(
+        "list-sessions",
+        "-F",
+        "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}",
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr = decode_git(proc.stderr).lower()
+        if "no server running" in stderr:
+            return []
+        raise DashboardError(decode_git(proc.stderr).strip() or "Unable to list tmux sessions.")
+
+    sessions = []
+    for line in decode_git(proc.stdout).splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4:
+            continue
+        name, windows, attached, created = parts
+        sessions.append(
+            {
+                "name": name,
+                "windows": int(windows or "0"),
+                "attached": int(attached or "0"),
+                "created": int(created or "0"),
+            }
+        )
+    return sorted(sessions, key=lambda item: item["name"].lower())
+
+
+def create_tmux_session(name: str) -> dict[str, Any]:
+    session_name = validate_session_name(name)
+    proc = tmux_command("new-session", "-d", "-s", session_name, check=False)
+    if proc.returncode != 0:
+        message = decode_git(proc.stderr).strip() or f"Unable to create tmux session {session_name}."
+        raise DashboardError(message)
+    for session in list_tmux_sessions():
+        if session["name"] == session_name:
+            return session
+    return {"name": session_name, "windows": 1, "attached": 0, "created": 0}
+
+
+def send_tmux_navigation(session_name: str, action: str, count: int = 5) -> None:
+    session = validate_session_name(session_name)
+    count = max(1, min(int(count), 200))
+    if action == "live":
+        tmux_command("send-keys", "-t", session, "-X", "cancel", check=False)
+        return
+    command_by_action = {
+        "scroll-up": "scroll-up",
+        "scroll-down": "scroll-down",
+        "page-up": "page-up",
+        "page-down": "page-down",
+    }
+    command = command_by_action.get(action)
+    if command is None:
+        return
+    tmux_command("copy-mode", "-t", session, check=False)
+    if action.startswith("page-"):
+        tmux_command("send-keys", "-t", session, "-X", command, check=False)
+    else:
+        tmux_command("send-keys", "-t", session, "-X", "-N", str(count), command, check=False)
+
+
+def tmux_option(session_name: str, option: str) -> str | None:
+    session = validate_session_name(session_name)
+    if option == "status":
+        proc = tmux_command("display-message", "-p", "-t", session, "#{status}", check=False)
+        if proc.returncode == 0:
+            return decode_git(proc.stdout).strip()
+    proc = tmux_command("show-options", "-qv", "-t", session, option, check=False)
+    if proc.returncode != 0:
+        return None
+    return decode_git(proc.stdout).strip()
+
+
+def set_tmux_option(session_name: str, option: str, value: str) -> None:
+    session = validate_session_name(session_name)
+    tmux_command("set-option", "-q", "-t", session, option, value, check=False)
+
+
+def token_is_valid(request: Request, token: str) -> bool:
+    supplied = request.query_params.get("token") or request.cookies.get(TOKEN_COOKIE)
+    return bool(supplied and secrets.compare_digest(supplied, token))
+
+
+def websocket_token_is_valid(websocket: WebSocket, token: str) -> bool:
+    supplied = websocket.query_params.get("token") or websocket.cookies.get(TOKEN_COOKIE)
+    return bool(supplied and secrets.compare_digest(supplied, token))
+
+
+def unauthorized_response() -> HTMLResponse:
+    return HTMLResponse(
+        """
+        <!doctype html>
+        <html lang="en">
+          <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Unauthorized</title></head>
+          <body style="margin:0;background:#1e1e1e;color:#d4d4d4;font-family:system-ui;display:grid;min-height:100vh;place-items:center">
+            <main style="max-width:30rem;padding:1.5rem">
+              <h1 style="font-size:1.25rem">Unauthorized</h1>
+              <p>Open the dashboard with the tokenized URL printed at startup.</p>
+            </main>
+          </body>
+        </html>
+        """,
+        status_code=HTTPStatus.UNAUTHORIZED,
+    )
+
+
+def set_winsize(fd: int, rows: int, cols: int) -> None:
+    rows = max(1, min(rows, 200))
+    cols = max(1, min(cols, 400))
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
+def refresh_tmux_client_size(client_name: str, rows: int, cols: int) -> None:
+    rows = max(1, min(rows, 200))
+    cols = max(1, min(cols, 400))
+    tmux_command("refresh-client", "-t", client_name, "-C", f"{cols}x{rows}", check=False)
+
+
+async def tmux_attach_socket(websocket: WebSocket, session_name: str, rows: int, cols: int) -> None:
+    session = validate_session_name(session_name)
+    send_tmux_navigation(session, "live")
+    previous_status = tmux_option(session, "status")
+    set_tmux_option(session, "status", "off")
+    master_fd, slave_fd = pty.openpty()
+    slave_name = os.ttyname(slave_fd)
+    set_winsize(master_fd, rows, cols)
+
+    def prepare_child_terminal() -> None:
+        os.setsid()
+        with contextlib.suppress(OSError):
+            fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+
+    env = {**os.environ, "TERM": "xterm-256color"}
+    proc = subprocess.Popen(
+        ["tmux", "attach-session", "-t", session],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+        env=env,
+        preexec_fn=prepare_child_terminal,
+    )
+    os.close(slave_fd)
+    os.set_blocking(master_fd, False)
+    refresh_tmux_client_size(slave_name, rows, cols)
+
+    loop = asyncio.get_running_loop()
+    output_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    def read_pty() -> None:
         try:
-            if parsed.path == "/api/state":
-                self.send_json(repo_state(self.server.repo))
-            elif parsed.path == "/api/file":
-                query = parse_qs(parsed.query)
-                paths = query.get("path") or []
-                if not paths:
-                    raise DashboardError("Missing path.")
-                self.send_json(file_payload(self.server.repo, paths[0]))
-            elif parsed.path.startswith("/api/"):
-                raise NotFoundError("API route not found.")
-            else:
-                if parsed.path == "/":
-                    self.path = "/index.html"
-                super().do_GET()
-        except DashboardError as exc:
-            self.send_json({"error": str(exc)}, status=exc.status)
-        except Exception as exc:
-            self.send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            while True:
+                try:
+                    data = os.read(master_fd, 8192)
+                except BlockingIOError:
+                    break
+                if not data:
+                    output_queue.put_nowait(None)
+                    break
+                output_queue.put_nowait(data)
+        except OSError:
+            output_queue.put_nowait(None)
 
-    def send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+    loop.add_reader(master_fd, read_pty)
+
+    async def send_output() -> None:
+        while True:
+            data = await output_queue.get()
+            if data is None:
+                break
+            await websocket.send_text(data.decode("utf-8", "replace"))
+
+    async def receive_input() -> None:
+        while True:
+            payload = await websocket.receive_json()
+            message_type = payload.get("type")
+            if message_type == "input":
+                send_tmux_navigation(session, "live")
+                os.write(master_fd, str(payload.get("data", "")).encode("utf-8", "replace"))
+            elif message_type == "tmux":
+                send_tmux_navigation(session, str(payload.get("action", "")), int(payload.get("count", 5)))
+            elif message_type == "resize":
+                next_rows = int(payload.get("rows", 30))
+                next_cols = int(payload.get("cols", 100))
+                set_winsize(master_fd, next_rows, next_cols)
+                refresh_tmux_client_size(slave_name, next_rows, next_cols)
+
+    output_task = asyncio.create_task(send_output())
+    input_task = asyncio.create_task(receive_input())
+    try:
+        done, pending = await asyncio.wait({output_task, input_task}, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            exc = task.exception()
+            if exc and not isinstance(exc, WebSocketDisconnect):
+                raise exc
+        for task in pending:
+            task.cancel()
+    finally:
+        loop.remove_reader(master_fd)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGHUP)
+        if previous_status in {"on", "off", "2", "3", "4", "5"}:
+            set_tmux_option(session, "status", previous_status)
+        with contextlib.suppress(OSError):
+            os.close(master_fd)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=1)
 
 
-class DashboardServer(ThreadingHTTPServer):
-    def __init__(self, server_address: tuple[str, int], repo: Path) -> None:
-        self.repo = repo
-        super().__init__(server_address, DashboardHandler)
+def create_app(repo: Path, token: str) -> FastAPI:
+    app = FastAPI()
+    static_dir = Path(str(resources.files("git_review_dashboard").joinpath("static")))
+
+    @app.middleware("http")
+    async def require_token(request: Request, call_next: Any) -> Response:
+        if not token_is_valid(request, token):
+            if request.url.path.startswith("/api/"):
+                return JSONResponse({"error": "Unauthorized"}, status_code=HTTPStatus.UNAUTHORIZED)
+            return unauthorized_response()
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        if request.query_params.get("token") == token:
+            response.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="lax")
+        return response
+
+    @app.exception_handler(DashboardError)
+    async def dashboard_error_handler(_: Request, exc: DashboardError) -> JSONResponse:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status)
+
+    @app.get("/api/state")
+    async def api_state() -> dict[str, Any]:
+        return repo_state(repo)
+
+    @app.get("/api/file")
+    async def api_file(path: str) -> dict[str, Any]:
+        return file_payload(repo, path)
+
+    @app.get("/api/tmux/sessions")
+    async def api_tmux_sessions() -> dict[str, Any]:
+        return {"sessions": list_tmux_sessions()}
+
+    @app.post("/api/tmux/sessions")
+    async def api_create_tmux_session(request: Request) -> dict[str, Any]:
+        payload = await request.json()
+        session = create_tmux_session(str(payload.get("name", "")))
+        return {"session": session, "sessions": list_tmux_sessions()}
+
+    @app.websocket("/api/tmux/attach")
+    async def api_tmux_attach(websocket: WebSocket) -> None:
+        if not websocket_token_is_valid(websocket, token):
+            await websocket.close(code=1008)
+            return
+        session = websocket.query_params.get("session")
+        if not session:
+            await websocket.close(code=1008)
+            return
+        rows = int(websocket.query_params.get("rows", 30))
+        cols = int(websocket.query_params.get("cols", 80))
+        await websocket.accept()
+        await tmux_attach_socket(websocket, session, rows, cols)
+
+    @app.get("/{asset_path:path}")
+    async def static_asset(asset_path: str) -> FileResponse:
+        target = (static_dir / (asset_path or "index.html")).resolve()
+        try:
+            target.relative_to(static_dir.resolve())
+        except ValueError as exc:
+            raise HTTPException(status_code=HTTPStatus.NOT_FOUND) from exc
+        if target.is_file():
+            return FileResponse(target, headers={"Cache-Control": "no-store"})
+        return FileResponse(static_dir / "index.html", headers={"Cache-Control": "no-store"})
+
+    return app
 
 
 def candidate_urls(host: str, port: int) -> list[str]:
     urls: list[str] = []
     display_host = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
-    urls.append(f"http://{display_host}:{port}")
+    urls.append(f"http://{format_url_host(display_host)}:{port}")
     if host in ("", "0.0.0.0", "::"):
         for address in private_addresses():
-            url = f"http://{address}:{port}"
+            url = f"http://{format_url_host(address)}:{port}"
             if url not in urls:
                 urls.append(url)
     return urls
+
+
+def format_url_host(host: str) -> str:
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
 
 
 def private_addresses() -> list[str]:
@@ -563,7 +825,20 @@ def private_addresses() -> list[str]:
             addresses.add(info[4][0])
     except OSError:
         pass
-    return sorted(address for address in addresses if not address.startswith("127."))
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        proc = subprocess.run(["hostname", "-I"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+        addresses.update(address.split("%", 1)[0] for address in decode_git(proc.stdout).split())
+
+    filtered = []
+    for address in addresses:
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if parsed.is_loopback or parsed.is_link_local or parsed.is_unspecified:
+            continue
+        filtered.append(address)
+    return sorted(filtered)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -583,23 +858,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    server = DashboardServer((args.host, args.port), repo)
-    port = server.server_address[1]
-    urls = candidate_urls(args.host, port)
+    token = secrets.token_urlsafe(32)
+    urls = [f"{url}/?token={quote(token)}" for url in candidate_urls(args.host, args.port)]
+    app = create_app(repo, token)
 
-    print(f"Repository: {repo}")
-    print("Serving read-only dashboard:")
+    print(f"Repository: {repo}", flush=True)
+    print("Serving dashboard:", flush=True)
     for url in urls:
-        print(f"  {url}")
-    print("Press Ctrl+C to stop.")
+        print(f"  {url}", flush=True)
+    print("Press Ctrl+C to stop.", flush=True)
 
     if not args.no_open and urls:
-        threading.Timer(0.25, lambda: webbrowser.open(urls[0])).start()
+        webbrowser.open(urls[0])
 
     try:
-        server.serve_forever()
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     except KeyboardInterrupt:
         print("\nStopping.")
-    finally:
-        server.server_close()
     return 0

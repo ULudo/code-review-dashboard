@@ -1,6 +1,9 @@
 import "@vscode/codicons/dist/codicon.css";
+import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -15,11 +18,12 @@ import ini from "highlight.js/lib/languages/ini";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 type Category = "clean" | "modified" | "new" | "deleted";
 type ViewMode = "full" | "changes";
+type AppView = "source" | "terminal";
 
 type TreeNode = {
   name: string;
@@ -79,6 +83,13 @@ type DiffLine = {
   kind: "meta" | "hunk" | "added" | "deleted" | "context";
 };
 
+type TmuxSession = {
+  name: string;
+  windows: number;
+  attached: number;
+  created: number;
+};
+
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("css", css);
 hljs.registerLanguage("go", go);
@@ -96,8 +107,8 @@ hljs.registerLanguage("xml", xml);
 hljs.registerLanguage("yaml", yaml);
 hljs.registerLanguage("yml", yaml);
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { cache: "no-store" });
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, { cache: "no-store", ...init });
   const payload = await response.json();
   if (!response.ok) {
     throw new Error(payload.error || response.statusText);
@@ -142,6 +153,8 @@ function useVisibilityRefresh(callback: () => void) {
 }
 
 function App() {
+  const [view, setView] = useState<AppView>("source");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [repoState, setRepoState] = useState<RepoState | null>(null);
   const [selectedPath, setSelectedPath] = useState(() => decodeURIComponent(window.location.hash.slice(1) || ""));
   const [selectedFile, setSelectedFile] = useState<FilePayload | null>(null);
@@ -211,6 +224,17 @@ function App() {
 
   const isFileOpen = Boolean(selectedPath);
 
+  if (view === "terminal") {
+    return (
+      <TerminalView
+        onSource={() => {
+          setView("source");
+          setMenuOpen(false);
+        }}
+      />
+    );
+  }
+
   return (
     <main className="app-shell">
       <section className={`explorer ${isFileOpen ? "mobile-hidden" : ""}`} aria-label="Repository files">
@@ -223,7 +247,15 @@ function App() {
               <span>{repoState ? `${repoState.counts.all} files, ${repoState.counts.total} changed` : ""}</span>
             </div>
           </div>
-          <button className="icon-button codicon codicon-refresh" type="button" title="Refresh" aria-label="Refresh" onClick={loadState} />
+          <div className="menu-wrap">
+            <button className="icon-button codicon codicon-menu" type="button" title="Menu" aria-label="Menu" onClick={() => setMenuOpen((open) => !open)} />
+            {menuOpen && (
+              <div className="app-menu">
+                <button type="button" className="active" onClick={() => setMenuOpen(false)}>Source</button>
+                <button type="button" onClick={() => { setView("terminal"); setMenuOpen(false); }}>Terminal</button>
+              </div>
+            )}
+          </div>
         </header>
 
         <div className="change-strip">
@@ -290,6 +322,338 @@ function App() {
       </section>
     </main>
   );
+}
+
+function TerminalView({ onSource }: { onSource: () => void }) {
+  const [sessions, setSessions] = useState<TmuxSession[]>([]);
+  const [activeSession, setActiveSession] = useState<string>("");
+  const [newSessionName, setNewSessionName] = useState("");
+  const [error, setError] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const loadSessions = useCallback(async () => {
+    try {
+      const payload = await fetchJson<{ sessions: TmuxSession[] }>("/api/tmux/sessions");
+      setSessions(payload.sessions);
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSessions();
+    const timer = window.setInterval(loadSessions, 5000);
+    return () => window.clearInterval(timer);
+  }, [loadSessions]);
+
+  const createSession = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const name = newSessionName.trim();
+    if (!name) return;
+    try {
+      const payload = await fetchJson<{ session: TmuxSession; sessions: TmuxSession[] }>("/api/tmux/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      setSessions(payload.sessions);
+      setActiveSession(payload.session.name);
+      setNewSessionName("");
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  if (activeSession) {
+    return <AttachedTerminal session={activeSession} onBack={() => { setActiveSession(""); loadSessions(); }} onSource={onSource} />;
+  }
+
+  return (
+    <main className="terminal-shell">
+      <header className="terminal-header">
+        <div className="title-stack">
+          <span className="section-label">Terminal</span>
+          <h1>tmux sessions</h1>
+          <div className="meta-line"><span>{sessions.length} sessions</span></div>
+        </div>
+        <div className="menu-wrap">
+          <button className="icon-button codicon codicon-menu" type="button" title="Menu" aria-label="Menu" onClick={() => setMenuOpen((open) => !open)} />
+          {menuOpen && (
+            <div className="app-menu">
+              <button type="button" onClick={onSource}>Source</button>
+              <button type="button" className="active" onClick={() => setMenuOpen(false)}>Terminal</button>
+            </div>
+          )}
+        </div>
+      </header>
+
+      <section className="terminal-session-panel">
+        <form className="new-session-form" onSubmit={createSession}>
+          <input
+            value={newSessionName}
+            onChange={(event) => setNewSessionName(event.target.value)}
+            placeholder="New session name"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+          <button type="submit" className="new-session-button" aria-label="Create session">
+            <span className="codicon codicon-add" />
+          </button>
+        </form>
+        {error && <div className="terminal-error">{error}</div>}
+        <div className="session-list">
+          {sessions.map((session) => (
+            <button className="session-row" type="button" key={session.name} onClick={() => setActiveSession(session.name)}>
+              <span className="codicon codicon-terminal" />
+              <span className="session-name">{session.name}</span>
+              <span className="session-meta">{session.windows} win · {session.attached} attached</span>
+            </button>
+          ))}
+          {!sessions.length && !error && <div className="empty-state">No tmux sessions.</div>}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function AttachedTerminal({ session, onBack, onSource }: { session: string; onBack: () => void; onSource: () => void }) {
+  const terminalHost = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const mobileInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const composingRef = useRef(false);
+  const useMobileInput = useMemo(() => window.matchMedia("(pointer: coarse)").matches, []);
+  const lastTouchY = useRef<number | null>(null);
+  const [status, setStatus] = useState("Connecting");
+
+  useEffect(() => {
+    if (!terminalHost.current) return;
+    const terminal = new Terminal({
+      cursorBlink: true,
+      disableStdin: useMobileInput,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+      fontSize: 12,
+      lineHeight: 1.15,
+      scrollback: 10000,
+      theme: {
+        background: "#1e1e1e",
+        foreground: "#d4d4d4",
+        cursor: "#d4d4d4",
+        selectionBackground: "#264f78",
+      },
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(terminalHost.current);
+    fitAddon.fit();
+    if (!useMobileInput) {
+      terminal.focus();
+    }
+
+    const initialDimensions = fitAddon.proposeDimensions();
+    const initialCols = initialDimensions?.cols || terminal.cols || 80;
+    const initialRows = initialDimensions?.rows || terminal.rows || 24;
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(`${protocol}://${window.location.host}/api/tmux/attach?session=${encodeURIComponent(session)}&cols=${initialCols}&rows=${initialRows}`);
+    socketRef.current = socket;
+    terminalRef.current = terminal;
+    fitRef.current = fitAddon;
+
+    socket.addEventListener("open", () => {
+      setStatus("Attached");
+      socket.send(JSON.stringify({ type: "tmux", action: "live" }));
+      sendTerminalSize(socket, terminal, fitAddon);
+    });
+    socket.addEventListener("message", (event) => terminal.write(String(event.data)));
+    socket.addEventListener("close", () => setStatus("Detached"));
+    socket.addEventListener("error", () => setStatus("Connection error"));
+    terminal.onData((data) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "input", data }));
+      }
+    });
+    terminal.onResize((size) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+      }
+    });
+
+    let resizeTimer = 0;
+    const onResize = () => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        fitAddon.fit();
+        sendTerminalSize(socket, terminal, fitAddon);
+      }, 160);
+    };
+    window.addEventListener("resize", onResize);
+
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.clearTimeout(resizeTimer);
+      socket.close();
+      terminal.dispose();
+    };
+  }, [session, useMobileInput]);
+
+  useEffect(() => {
+    let resizeTimer = 0;
+    const updateViewportHeight = () => {
+      const height = window.visualViewport?.height ?? window.innerHeight;
+      document.documentElement.style.setProperty("--terminal-height", `${height}px`);
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        fitRef.current?.fit();
+        const socket = socketRef.current;
+        const terminal = terminalRef.current;
+        const fitAddon = fitRef.current;
+        if (socket && terminal && fitAddon) {
+          sendTerminalSize(socket, terminal, fitAddon);
+        }
+      }, 220);
+    };
+    updateViewportHeight();
+    window.visualViewport?.addEventListener("resize", updateViewportHeight);
+    return () => {
+      window.visualViewport?.removeEventListener("resize", updateViewportHeight);
+      window.clearTimeout(resizeTimer);
+      document.documentElement.style.removeProperty("--terminal-height");
+    };
+  }, []);
+
+  const sendTmuxNavigation = (action: string, count = 5) => {
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "tmux", action, count }));
+    }
+  };
+
+  const focusTerminal = () => {
+    sendTmuxNavigation("live");
+    if (useMobileInput) {
+      mobileInputRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    terminalRef.current?.focus();
+  };
+
+  const sendInput = (data: string) => {
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "input", data }));
+    }
+  };
+
+  const handleMobileInput = (event: React.FormEvent<HTMLTextAreaElement>) => {
+    if (composingRef.current) return;
+    const value = event.currentTarget.value;
+    if (value) {
+      sendInput(value);
+      event.currentTarget.value = "";
+    }
+  };
+
+  const handleMobileKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Backspace") {
+      event.preventDefault();
+      sendInput("\x7f");
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      sendInput("\r");
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      sendInput("\x1b");
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      sendInput("\t");
+    }
+  };
+
+  const handleTerminalWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (Math.abs(event.deltaY) < 4) return;
+    event.preventDefault();
+    const count = Math.min(50, Math.max(3, Math.round(Math.abs(event.deltaY) / 8)));
+    sendTmuxNavigation(event.deltaY < 0 ? "scroll-up" : "scroll-down", count);
+  };
+
+  const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
+    lastTouchY.current = event.touches[0]?.clientY ?? null;
+  };
+
+  const handleTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+    const currentY = event.touches[0]?.clientY;
+    const previousY = lastTouchY.current;
+    if (currentY == null || previousY == null) return;
+    const delta = currentY - previousY;
+    if (Math.abs(delta) < 14) return;
+    event.preventDefault();
+    const count = Math.min(30, Math.max(3, Math.round(Math.abs(delta) / 6)));
+    sendTmuxNavigation(delta > 0 ? "scroll-up" : "scroll-down", count);
+    lastTouchY.current = currentY;
+  };
+
+  const handleTouchEnd = () => {
+    lastTouchY.current = null;
+  };
+
+  return (
+    <main className="terminal-shell">
+      <header className="terminal-header attached">
+        <button className="back-button" type="button" onClick={onBack}>
+          <span className="codicon codicon-arrow-left" />
+          Sessions
+        </button>
+        <div className="file-title">
+          <h2>{session}</h2>
+          <span className="status-pill clean">{status}</span>
+        </div>
+        <button className="source-button" type="button" onClick={onSource}>Source</button>
+      </header>
+      <div className="terminal-live">
+        <div
+          className="terminal-host"
+          ref={terminalHost}
+          onClick={focusTerminal}
+          onWheel={handleTerminalWheel}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+        />
+        {useMobileInput && (
+          <textarea
+            ref={mobileInputRef}
+            className="terminal-mobile-input"
+            aria-label="Terminal input"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="send"
+            onCompositionStart={() => { composingRef.current = true; }}
+            onCompositionEnd={(event) => {
+              composingRef.current = false;
+              handleMobileInput(event);
+            }}
+            onInput={handleMobileInput}
+            onKeyDown={handleMobileKeyDown}
+          />
+        )}
+      </div>
+    </main>
+  );
+}
+
+function sendTerminalSize(socket: WebSocket, terminal: Terminal, fitAddon: FitAddon) {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  const dimensions = fitAddon.proposeDimensions();
+  socket.send(JSON.stringify({
+    type: "resize",
+    cols: dimensions?.cols || terminal.cols,
+    rows: dimensions?.rows || terminal.rows,
+  }));
 }
 
 function FullCodeView({ lines, language }: { lines: FullLine[]; language: string }) {

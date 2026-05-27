@@ -2,7 +2,9 @@
   color-scheme: dark;
   --bg: #1e1e1e;
   --side: #252526;
+  --panel: #202020;
   --bar: #2d2d30;
+  --input: #1b1b1b;
   --line: #3c3c3c;
   --line-soft: #2a2d2e;
   --text: #d4d4d4;
@@ -28,6 +30,8 @@ body,
 #root {
   width: 100%;
   height: 100%;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
@@ -150,6 +154,43 @@ h2 {
   width: 34px;
   padding: 0;
   color: var(--text);
+}
+
+.menu-wrap {
+  position: relative;
+}
+
+.app-menu {
+  position: absolute;
+  top: 40px;
+  right: 0;
+  z-index: 20;
+  min-width: 150px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #252526;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+}
+
+.app-menu button {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.app-menu button:last-child {
+  border-bottom: 0;
+}
+
+.app-menu button.active {
+  color: var(--blue);
 }
 
 .back-button {
@@ -491,4 +532,181 @@ h2 {
 .diff-prefix {
   user-select: text;
   -webkit-user-select: text;
+}
+
+.terminal-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: var(--terminal-height, 100dvh);
+  min-width: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.terminal-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 10px;
+  align-items: center;
+  min-height: 58px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bar);
+}
+
+.terminal-header.attached {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 42px;
+  padding: 5px 6px;
+}
+
+.terminal-header.attached .back-button,
+.terminal-header.attached .source-button {
+  min-height: 30px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.terminal-header.attached .file-title h2 {
+  font-size: 13px;
+}
+
+.terminal-header.attached .status-pill {
+  padding: 1px 6px;
+  font-size: 10px;
+}
+
+.terminal-session-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--side);
+}
+
+.new-session-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.new-session-form input {
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #1e1e1e;
+  color: var(--text);
+  font: inherit;
+}
+
+.new-session-button,
+.source-button {
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #333333;
+  color: var(--text);
+  font: inherit;
+}
+
+.session-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.session-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.session-row:active,
+.session-row:hover {
+  background: var(--hover);
+}
+
+.session-row .codicon {
+  color: var(--green);
+}
+
+.session-name {
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.terminal-error {
+  margin: 10px;
+  padding: 10px;
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  color: var(--red);
+}
+
+.terminal-live {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.terminal-host {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.terminal-host .xterm {
+  height: 100%;
+  padding: 0;
+  font-size: 12px;
+}
+
+.terminal-host .xterm-rows {
+  font-size: inherit !important;
+  line-height: normal !important;
+}
+
+.terminal-mobile-input {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  height: 100%;
+  min-height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  font-size: 16px;
+  line-height: 1;
+  resize: none;
+  outline: none;
+  pointer-events: none;
 }
