@@ -429,9 +429,14 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   const useMobileInput = useMemo(() => window.matchMedia("(pointer: coarse)").matches, []);
   const lastTouchY = useRef<number | null>(null);
   const [status, setStatus] = useState("Connecting");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectionText, setSelectionText] = useState("");
 
   useEffect(() => {
     if (!terminalHost.current) return;
+    let disposed = false;
+    let reconnectTimer = 0;
+    let heartbeatTimer = 0;
     const terminal = new Terminal({
       cursorBlink: true,
       disableStdin: useMobileInput,
@@ -458,26 +463,52 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     const initialCols = initialDimensions?.cols || terminal.cols || 80;
     const initialRows = initialDimensions?.rows || terminal.rows || 24;
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${protocol}://${window.location.host}/api/tmux/attach?session=${encodeURIComponent(session)}&cols=${initialCols}&rows=${initialRows}`);
-    socketRef.current = socket;
     terminalRef.current = terminal;
     fitRef.current = fitAddon;
 
-    socket.addEventListener("open", () => {
-      setStatus("Attached");
-      socket.send(JSON.stringify({ type: "tmux", action: "live" }));
-      sendTerminalSize(socket, terminal, fitAddon);
-    });
-    socket.addEventListener("message", (event) => terminal.write(String(event.data)));
-    socket.addEventListener("close", () => setStatus("Detached"));
-    socket.addEventListener("error", () => setStatus("Connection error"));
-    terminal.onData((data) => {
-      if (socket.readyState === WebSocket.OPEN) {
+    const connectSocket = () => {
+      if (disposed) return;
+      setStatus(socketRef.current ? "Reconnecting" : "Connecting");
+      const nextSocket = new WebSocket(`${protocol}://${window.location.host}/api/tmux/attach?session=${encodeURIComponent(session)}&cols=${initialCols}&rows=${initialRows}`);
+      socketRef.current = nextSocket;
+
+      nextSocket.addEventListener("open", () => {
+        setStatus("Attached");
+        sendTerminalSize(nextSocket, terminal, fitAddon);
+        window.clearInterval(heartbeatTimer);
+        heartbeatTimer = window.setInterval(() => {
+          if (nextSocket.readyState === WebSocket.OPEN) {
+            try {
+              nextSocket.send(JSON.stringify({ type: "ping" }));
+            } catch {
+              nextSocket.close();
+            }
+          }
+        }, 25000);
+      });
+      nextSocket.addEventListener("message", (event) => terminal.write(String(event.data)));
+      nextSocket.addEventListener("close", () => {
+        window.clearInterval(heartbeatTimer);
+        if (disposed) return;
+        setStatus("Reconnecting");
+        reconnectTimer = window.setTimeout(connectSocket, 1200);
+      });
+      nextSocket.addEventListener("error", () => {
+        setStatus("Connection error");
+        nextSocket.close();
+      });
+    };
+    connectSocket();
+
+    const dataDisposable = terminal.onData((data) => {
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "input", data }));
       }
     });
-    terminal.onResize((size) => {
-      if (socket.readyState === WebSocket.OPEN) {
+    const resizeDisposable = terminal.onResize((size) => {
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
       }
     });
@@ -487,15 +518,23 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
         fitAddon.fit();
-        sendTerminalSize(socket, terminal, fitAddon);
+        const socket = socketRef.current;
+        if (socket) {
+          sendTerminalSize(socket, terminal, fitAddon);
+        }
       }, 160);
     };
     window.addEventListener("resize", onResize);
 
     return () => {
+      disposed = true;
       window.removeEventListener("resize", onResize);
       window.clearTimeout(resizeTimer);
-      socket.close();
+      window.clearTimeout(reconnectTimer);
+      window.clearInterval(heartbeatTimer);
+      dataDisposable.dispose();
+      resizeDisposable.dispose();
+      socketRef.current?.close();
       terminal.dispose();
     };
   }, [session, useMobileInput]);
@@ -533,7 +572,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   };
 
   const focusTerminal = () => {
-    sendTmuxNavigation("live");
+    if (selectionMode) return;
     if (useMobileInput) {
       mobileInputRef.current?.focus({ preventScroll: true });
       return;
@@ -574,17 +613,27 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   };
 
   const handleTerminalWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (selectionMode) return;
     if (Math.abs(event.deltaY) < 4) return;
     event.preventDefault();
     const count = Math.min(50, Math.max(3, Math.round(Math.abs(event.deltaY) / 8)));
     sendTmuxNavigation(event.deltaY < 0 ? "scroll-up" : "scroll-down", count);
   };
 
+  const handleMobilePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!useMobileInput || selectionMode) return;
+    event.preventDefault();
+    event.stopPropagation();
+    mobileInputRef.current?.focus({ preventScroll: true });
+  };
+
   const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (selectionMode) return;
     lastTouchY.current = event.touches[0]?.clientY ?? null;
   };
 
   const handleTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (selectionMode) return;
     const currentY = event.touches[0]?.clientY;
     const previousY = lastTouchY.current;
     if (currentY == null || previousY == null) return;
@@ -600,6 +649,17 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     lastTouchY.current = null;
   };
 
+  const toggleSelectionMode = () => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    if (selectionMode) {
+      setSelectionMode(false);
+      return;
+    }
+    setSelectionText(terminalBufferText(terminal));
+    setSelectionMode(true);
+  };
+
   return (
     <main className="terminal-shell">
       <header className="terminal-header attached">
@@ -611,18 +671,34 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
           <h2>{session}</h2>
           <span className="status-pill clean">{status}</span>
         </div>
-        <button className="source-button" type="button" onClick={onSource}>Source</button>
+        <div className="terminal-actions">
+          <button className={`source-button ${selectionMode ? "active" : ""}`} type="button" onClick={toggleSelectionMode}>
+            {selectionMode ? "Live" : "Select"}
+          </button>
+        </div>
       </header>
       <div className="terminal-live">
         <div
           className="terminal-host"
           ref={terminalHost}
           onClick={focusTerminal}
+          onPointerDownCapture={handleMobilePointerDown}
           onWheel={handleTerminalWheel}
           onTouchStart={handleTouchStart}
           onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
         />
+        {selectionMode && (
+          <textarea
+            className="terminal-selection-layer"
+            aria-label="Selectable terminal text"
+            readOnly
+            value={selectionText || "No terminal text available."}
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+        )}
         {useMobileInput && (
           <textarea
             ref={mobileInputRef}
@@ -644,6 +720,16 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       </div>
     </main>
   );
+}
+
+function terminalBufferText(terminal: Terminal): string {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+  for (let index = 0; index < buffer.length; index += 1) {
+    const line = buffer.getLine(index);
+    if (line) lines.push(line.translateToString(true));
+  }
+  return lines.join("\n").replace(/\s+$/u, "");
 }
 
 function sendTerminalSize(socket: WebSocket, terminal: Terminal, fitAddon: FitAddon) {
