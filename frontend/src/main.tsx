@@ -424,13 +424,49 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const mobileInputRef = useRef<HTMLTextAreaElement | null>(null);
-  const composingRef = useRef(false);
+  const composeOpenRef = useRef(false);
+  const resizeLockedRef = useRef(false);
+  const composerActionHandledRef = useRef(false);
+  const composerComposingRef = useRef(false);
   const useMobileInput = useMemo(() => window.matchMedia("(pointer: coarse)").matches, []);
   const lastTouchY = useRef<number | null>(null);
   const [status, setStatus] = useState("Connecting");
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectionText, setSelectionText] = useState("");
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [composeText, setComposeText] = useState("");
+
+  const fitTerminal = (sendSize: boolean) => {
+    const socket = socketRef.current;
+    const terminal = terminalRef.current;
+    const fitAddon = fitRef.current;
+    if (!terminal || !fitAddon) return;
+    fitAddon.fit();
+    if (sendSize && socket) {
+      sendTerminalSize(socket, terminal, fitAddon);
+    }
+  };
+
+  const terminalViewportHeight = () => {
+    return composeOpenRef.current ? window.visualViewport?.height ?? window.innerHeight : window.innerHeight;
+  };
+
+  useEffect(() => {
+    composeOpenRef.current = composeOpen;
+  }, [composeOpen]);
+
+  useEffect(() => {
+    if (!composeOpen) return;
+    const keepPagePinned = () => window.scrollTo(0, 0);
+    keepPagePinned();
+    window.addEventListener("scroll", keepPagePinned, { passive: true });
+    window.visualViewport?.addEventListener("scroll", keepPagePinned, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", keepPagePinned);
+      window.visualViewport?.removeEventListener("scroll", keepPagePinned);
+      keepPagePinned();
+    };
+  }, [composeOpen]);
 
   useEffect(() => {
     if (!terminalHost.current) return;
@@ -507,6 +543,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       }
     });
     const resizeDisposable = terminal.onResize((size) => {
+      if (composeOpenRef.current) return;
       const socket = socketRef.current;
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
@@ -519,7 +556,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       resizeTimer = window.setTimeout(() => {
         fitAddon.fit();
         const socket = socketRef.current;
-        if (socket) {
+        if (socket && !composeOpenRef.current) {
           sendTerminalSize(socket, terminal, fitAddon);
         }
       }, 160);
@@ -542,15 +579,14 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   useEffect(() => {
     let resizeTimer = 0;
     const updateViewportHeight = () => {
-      const height = window.visualViewport?.height ?? window.innerHeight;
-      document.documentElement.style.setProperty("--terminal-height", `${height}px`);
+      document.documentElement.style.setProperty("--terminal-height", `${terminalViewportHeight()}px`);
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
         fitRef.current?.fit();
         const socket = socketRef.current;
         const terminal = terminalRef.current;
         const fitAddon = fitRef.current;
-        if (socket && terminal && fitAddon) {
+        if (socket && terminal && fitAddon && !composeOpenRef.current) {
           sendTerminalSize(socket, terminal, fitAddon);
         }
       }, 220);
@@ -564,6 +600,14 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     };
   }, []);
 
+  useEffect(() => {
+    if (composeOpen) return;
+    document.documentElement.style.setProperty("--terminal-height", `${terminalViewportHeight()}px`);
+    window.setTimeout(() => {
+      fitTerminal(true);
+    }, 160);
+  }, [composeOpen]);
+
   const sendTmuxNavigation = (action: string, count = 5) => {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) {
@@ -573,10 +617,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
 
   const focusTerminal = () => {
     if (selectionMode) return;
-    if (useMobileInput) {
-      mobileInputRef.current?.focus({ preventScroll: true });
-      return;
-    }
+    if (useMobileInput) return;
     terminalRef.current?.focus();
   };
 
@@ -587,22 +628,72 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     }
   };
 
-  const handleMobileInput = (event: React.FormEvent<HTMLTextAreaElement>) => {
-    if (composingRef.current) return;
-    const value = event.currentTarget.value;
-    if (value) {
-      sendInput(value);
-      event.currentTarget.value = "";
+  const setResizeLock = (locked: boolean) => {
+    if (resizeLockedRef.current === locked) return;
+    resizeLockedRef.current = locked;
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "resize-lock", locked }));
     }
   };
 
-  const handleMobileKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Backspace") {
+  const openComposer = () => {
+    if (!useMobileInput || selectionMode) return;
+    if (composeOpenRef.current) return;
+    composeOpenRef.current = true;
+    setResizeLock(true);
+    setComposeOpen(true);
+  };
+
+  const toggleComposer = () => {
+    if (composeOpenRef.current) {
+      closeComposer(false);
+      return;
+    }
+    openComposer();
+  };
+
+  const closeComposer = (clearText = true) => {
+    if (!composeOpenRef.current && !composeOpen) {
+      setResizeLock(false);
+      return;
+    }
+    composeOpenRef.current = false;
+    setComposeOpen(false);
+    if (clearText) {
+      setComposeText("");
+    }
+    window.setTimeout(() => {
+      fitTerminal(false);
+      setResizeLock(false);
+      fitTerminal(true);
+      window.setTimeout(() => fitTerminal(true), 220);
+    }, 180);
+  };
+
+  const sendLiveText = (value: string) => {
+    if (!value || composerComposingRef.current) return;
+    sendInput(value);
+    setComposeText("");
+  };
+
+  const sendEnter = () => {
+    sendInput("\r");
+  };
+
+  const handleComposerChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const value = event.target.value;
+    setComposeText(value);
+    sendLiveText(value);
+  };
+
+  const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      sendEnter();
+    } else if (event.key === "Backspace" && !event.currentTarget.value) {
       event.preventDefault();
       sendInput("\x7f");
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      sendInput("\r");
     } else if (event.key === "Escape") {
       event.preventDefault();
       sendInput("\x1b");
@@ -610,6 +701,20 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       event.preventDefault();
       sendInput("\t");
     }
+  };
+
+  const handleComposerAction = (event: React.PointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    composerActionHandledRef.current = true;
+    sendEnter();
+    window.setTimeout(() => {
+      composerActionHandledRef.current = false;
+    }, 500);
+  };
+
+  const handleComposerClick = () => {
+    if (composerActionHandledRef.current) return;
+    sendEnter();
   };
 
   const handleTerminalWheel = (event: React.WheelEvent<HTMLDivElement>) => {
@@ -622,9 +727,10 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
 
   const handleMobilePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!useMobileInput || selectionMode) return;
+    if (composeOpen) return;
     event.preventDefault();
     event.stopPropagation();
-    mobileInputRef.current?.focus({ preventScroll: true });
+    openComposer();
   };
 
   const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
@@ -656,6 +762,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       setSelectionMode(false);
       return;
     }
+    closeComposer(false);
     setSelectionText(terminalBufferText(terminal));
     setSelectionMode(true);
   };
@@ -672,6 +779,11 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
           <span className="status-pill clean">{status}</span>
         </div>
         <div className="terminal-actions">
+          {useMobileInput && (
+            <button className={`source-button ${composeOpen ? "active" : ""}`} type="button" onClick={toggleComposer}>
+              Text
+            </button>
+          )}
           <button className={`source-button ${selectionMode ? "active" : ""}`} type="button" onClick={toggleSelectionMode}>
             {selectionMode ? "Live" : "Select"}
           </button>
@@ -699,23 +811,36 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
             spellCheck={false}
           />
         )}
-        {useMobileInput && (
-          <textarea
-            ref={mobileInputRef}
-            className="terminal-mobile-input"
-            aria-label="Terminal input"
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-            enterKeyHint="send"
-            onCompositionStart={() => { composingRef.current = true; }}
-            onCompositionEnd={(event) => {
-              composingRef.current = false;
-              handleMobileInput(event);
-            }}
-            onInput={handleMobileInput}
-            onKeyDown={handleMobileKeyDown}
-          />
+        {composeOpen && (
+          <div className="terminal-compose">
+            <div className="terminal-compose-row">
+              <input
+                className="terminal-compose-input"
+                value={composeText}
+                onChange={handleComposerChange}
+                onCompositionStart={() => { composerComposingRef.current = true; }}
+                onCompositionEnd={(event) => {
+                  composerComposingRef.current = false;
+                  sendLiveText(event.currentTarget.value);
+                }}
+                onKeyDown={handleComposerKeyDown}
+                placeholder="Type or paste"
+                autoFocus
+                autoCapitalize="sentences"
+                autoComplete="on"
+                autoCorrect="on"
+                enterKeyHint="send"
+                spellCheck={true}
+              />
+              <button
+                type="button"
+                onPointerDown={handleComposerAction}
+                onClick={handleComposerClick}
+              >
+                Send
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </main>

@@ -535,9 +535,12 @@ h2 {
 }
 
 .terminal-shell {
+  position: fixed;
+  inset: 0;
   display: flex;
   flex-direction: column;
-  width: 100%;
+  overflow: hidden;
+  width: 100vw;
   height: var(--terminal-height, 100dvh);
   min-width: 0;
   background: var(--bg);
@@ -731,28 +734,62 @@ h2 {
   touch-action: pan-y;
 }
 
-.terminal-mobile-input {
+.terminal-compose {
   position: absolute;
   right: 0;
   bottom: 0;
-  z-index: -1;
-  width: 1px;
-  height: 1px;
-  min-height: 1px;
-  padding: 0;
-  border: 0;
-  overflow: hidden;
-  opacity: 0;
-  background: transparent;
-  color: transparent;
-  caret-color: transparent;
-  font-size: 16px;
-  line-height: 1;
-  resize: none;
+  left: 0;
+  z-index: 20;
+  padding: 3px 5px max(3px, env(safe-area-inset-bottom));
+  background: #252526;
+  border-top: 1px solid var(--line);
+}
+
+.terminal-compose-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+}
+
+.terminal-compose-input {
+  width: 100%;
+  min-width: 0;
+  height: 27px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #1e1e1e;
+  color: var(--text);
+  font: 16px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   outline: none;
-  appearance: none;
-  -webkit-appearance: none;
-  -webkit-tap-highlight-color: transparent;
-  clip-path: inset(50%);
-  pointer-events: none;
+  transform: scale(.875);
+  transform-origin: left center;
+  width: 114.2857%;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.terminal-compose-input:focus {
+  border-color: var(--blue);
+}
+
+.terminal-compose-row button {
+  min-height: 27px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #333333;
+  color: var(--text);
+  font: 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.terminal-compose-row button:disabled {
+  opacity: .45;
+}
+
+.terminal-compose-row button:last-child {
+  border-color: var(--blue);
+  background: #094771;
 }

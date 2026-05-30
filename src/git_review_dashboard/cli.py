@@ -692,6 +692,7 @@ async def tmux_attach_socket(websocket: WebSocket, session_name: str, rows: int,
             await websocket.send_text(data.decode("utf-8", "replace"))
 
     async def receive_input() -> None:
+        resize_locked = False
         while True:
             payload = await websocket.receive_json()
             message_type = payload.get("type")
@@ -700,7 +701,11 @@ async def tmux_attach_socket(websocket: WebSocket, session_name: str, rows: int,
                 os.write(master_fd, str(payload.get("data", "")).encode("utf-8", "replace"))
             elif message_type == "tmux":
                 send_tmux_navigation(session, str(payload.get("action", "")), int(payload.get("count", 5)))
+            elif message_type == "resize-lock":
+                resize_locked = bool(payload.get("locked"))
             elif message_type == "resize":
+                if resize_locked:
+                    continue
                 next_rows = int(payload.get("rows", 30))
                 next_cols = int(payload.get("cols", 100))
                 set_winsize(master_fd, next_rows, next_cols)
