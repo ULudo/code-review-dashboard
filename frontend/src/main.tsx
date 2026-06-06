@@ -782,7 +782,6 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       focusComposerInput();
       return;
     }
-    openComposer();
   };
 
   const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
