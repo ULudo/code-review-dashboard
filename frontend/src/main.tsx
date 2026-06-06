@@ -19,6 +19,7 @@ import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 type Category = "clean" | "modified" | "new" | "deleted";
@@ -424,10 +425,12 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const composerInputRef = useRef<HTMLInputElement | null>(null);
   const composeOpenRef = useRef(false);
   const resizeLockedRef = useRef(false);
   const composerActionHandledRef = useRef(false);
   const composerComposingRef = useRef(false);
+  const composeTextRef = useRef("");
   const useMobileInput = useMemo(() => window.matchMedia("(pointer: coarse)").matches, []);
   const lastTouchY = useRef<number | null>(null);
   const [status, setStatus] = useState("Connecting");
@@ -454,6 +457,10 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   useEffect(() => {
     composeOpenRef.current = composeOpen;
   }, [composeOpen]);
+
+  useEffect(() => {
+    composeTextRef.current = composeText;
+  }, [composeText]);
 
   useEffect(() => {
     if (!composeOpen) return;
@@ -637,12 +644,23 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     }
   };
 
+  const focusComposerInput = () => {
+    composerInputRef.current?.focus({ preventScroll: true });
+  };
+
   const openComposer = () => {
     if (!useMobileInput || selectionMode) return;
-    if (composeOpenRef.current) return;
+    if (composeOpenRef.current) {
+      focusComposerInput();
+      return;
+    }
     composeOpenRef.current = true;
     setResizeLock(true);
-    setComposeOpen(true);
+    flushSync(() => {
+      setComposeOpen(true);
+    });
+    focusComposerInput();
+    window.setTimeout(focusComposerInput, 60);
   };
 
   const toggleComposer = () => {
@@ -661,6 +679,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     composeOpenRef.current = false;
     setComposeOpen(false);
     if (clearText) {
+      composeTextRef.current = "";
       setComposeText("");
     }
     window.setTimeout(() => {
@@ -671,20 +690,50 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     }, 180);
   };
 
-  const sendLiveText = (value: string) => {
-    if (!value || composerComposingRef.current) return;
-    sendInput(value);
-    setComposeText("");
+  const sendTextDelta = (previous: string, next: string) => {
+    if (next === previous || composerComposingRef.current) return;
+    if (next.startsWith(previous)) {
+      sendInput(next.slice(previous.length));
+      return;
+    }
+    if (previous.startsWith(next)) {
+      sendInput("\x7f".repeat(previous.length - next.length));
+      return;
+    }
+
+    let prefixLength = 0;
+    while (
+      prefixLength < previous.length &&
+      prefixLength < next.length &&
+      previous[prefixLength] === next[prefixLength]
+    ) {
+      prefixLength += 1;
+    }
+
+    const removed = previous.length - prefixLength;
+    const added = next.slice(prefixLength);
+    if (removed > 0) {
+      sendInput("\x7f".repeat(removed));
+    }
+    if (added) {
+      sendInput(added);
+    }
   };
 
   const sendEnter = () => {
     sendInput("\r");
+    composeTextRef.current = "";
+    setComposeText("");
+  };
+
+  const updateComposerValue = (value: string) => {
+    sendTextDelta(composeTextRef.current, value);
+    composeTextRef.current = value;
+    setComposeText(value);
   };
 
   const handleComposerChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const value = event.target.value;
-    setComposeText(value);
-    sendLiveText(value);
+    updateComposerValue(event.target.value);
   };
 
   const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -727,9 +776,12 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
 
   const handleMobilePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!useMobileInput || selectionMode) return;
-    if (composeOpen) return;
     event.preventDefault();
     event.stopPropagation();
+    if (composeOpenRef.current) {
+      focusComposerInput();
+      return;
+    }
     openComposer();
   };
 
@@ -815,13 +867,14 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
           <div className="terminal-compose">
             <div className="terminal-compose-row">
               <input
+                ref={composerInputRef}
                 className="terminal-compose-input"
                 value={composeText}
                 onChange={handleComposerChange}
                 onCompositionStart={() => { composerComposingRef.current = true; }}
                 onCompositionEnd={(event) => {
                   composerComposingRef.current = false;
-                  sendLiveText(event.currentTarget.value);
+                  updateComposerValue(event.currentTarget.value);
                 }}
                 onKeyDown={handleComposerKeyDown}
                 placeholder="Type or paste"
