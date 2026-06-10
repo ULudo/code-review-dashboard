@@ -24,11 +24,11 @@ from http import HTTPStatus
 from importlib import resources
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.middleware.gzip import GZipMiddleware
 
 
@@ -36,6 +36,10 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
 TEXT_LIMIT_BYTES = 1_500_000
 TOKEN_COOKIE = "code_review_dashboard_token"
+TOKEN_CONFIG_DIR = "code-review-dashboard"
+TOKEN_FILE = "token"
+TOKEN_BYTES = 18
+TOKEN_COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 5
 SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 
 LANGUAGE_BY_EXTENSION = {
@@ -106,6 +110,43 @@ def detect_repo(start: Path) -> Path:
     if proc.returncode != 0:
         raise DashboardError(f"{start} is not inside a Git repository.")
     return Path(decode_git(proc.stdout).strip()).resolve()
+
+
+def token_config_dir() -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(config_home).expanduser() if config_home else Path.home() / ".config"
+    return base / TOKEN_CONFIG_DIR
+
+
+def token_file_path() -> Path:
+    return token_config_dir() / TOKEN_FILE
+
+
+def write_token_file(path: Path, token: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        path.parent.chmod(0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(f"{token}\n")
+    with contextlib.suppress(OSError):
+        path.chmod(0o600)
+
+
+def load_or_create_token(reset: bool = False) -> tuple[str, bool, Path]:
+    path = token_file_path()
+    created = reset or not path.exists()
+    if not created:
+        token = path.read_text(encoding="utf-8").strip()
+        if token:
+            with contextlib.suppress(OSError):
+                path.chmod(0o600)
+            return token, False, path
+        created = True
+
+    token = secrets.token_urlsafe(TOKEN_BYTES)
+    write_token_file(path, token)
+    return token, created, path
 
 
 def is_git_repo_root(path: Path) -> bool:
@@ -665,16 +706,35 @@ def unauthorized_response() -> HTMLResponse:
         """
         <!doctype html>
         <html lang="en">
-          <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Unauthorized</title></head>
-          <body style="margin:0;background:#1e1e1e;color:#d4d4d4;font-family:system-ui;display:grid;min-height:100vh;place-items:center">
-            <main style="max-width:30rem;padding:1.5rem">
-              <h1 style="font-size:1.25rem">Unauthorized</h1>
-              <p>Open the dashboard with the tokenized URL printed at startup.</p>
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Pair Code Review Dashboard</title>
+          </head>
+          <body style="margin:0;background:#1e1e1e;color:#d4d4d4;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;display:grid;min-height:100vh;place-items:center">
+            <main style="box-sizing:border-box;width:min(28rem,100%);padding:1.5rem">
+              <h1 style="font-size:1.2rem;font-weight:600;margin:0 0 .75rem">Pair dashboard</h1>
+              <p style="line-height:1.45;color:#aeb6c2;margin:0 0 1rem">Enter the pairing token printed by the server. After pairing, this browser can use the clean URL.</p>
+              <form method="get" action="/" style="display:flex;gap:.5rem">
+                <input name="token" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" required
+                  style="min-width:0;flex:1;border:1px solid #3c3c3c;background:#252526;color:#d4d4d4;border-radius:6px;padding:.7rem .8rem;font:inherit">
+                <button type="submit" style="border:0;background:#007acc;color:white;border-radius:6px;padding:.7rem .9rem;font:inherit;font-weight:600">Pair</button>
+              </form>
             </main>
           </body>
         </html>
         """,
         status_code=HTTPStatus.UNAUTHORIZED,
+    )
+
+
+def set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        TOKEN_COOKIE,
+        token,
+        httponly=True,
+        max_age=TOKEN_COOKIE_MAX_AGE,
+        samesite="lax",
     )
 
 
@@ -843,10 +903,15 @@ def create_app(repo: Path, token: str, workspace: Path | None = None, initial_pr
             if request.url.path.startswith("/api/"):
                 return JSONResponse({"error": "Unauthorized"}, status_code=HTTPStatus.UNAUTHORIZED)
             return unauthorized_response()
+        if request.query_params.get("token") == token and not request.url.path.startswith("/api/"):
+            response = RedirectResponse(request.url.path or "/", status_code=HTTPStatus.SEE_OTHER)
+            response.headers.setdefault("Cache-Control", "no-store")
+            set_auth_cookie(response, token)
+            return response
         response = await call_next(request)
         response.headers.setdefault("Cache-Control", "no-store")
         if request.query_params.get("token") == token:
-            response.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="lax")
+            set_auth_cookie(response, token)
         return response
 
     @app.exception_handler(DashboardError)
@@ -958,6 +1023,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"Host/interface to bind, default {DEFAULT_HOST}.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port to bind, default {DEFAULT_PORT}.")
     parser.add_argument("--no-open", action="store_true", help="Do not open a local browser.")
+    parser.add_argument("--reset-token", action="store_true", help="Generate a new pairing token and invalidate existing browser cookies.")
     return parser.parse_args(argv)
 
 
@@ -987,8 +1053,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
 
-    token = secrets.token_urlsafe(32)
-    urls = [f"{url}/?token={quote(token)}" for url in candidate_urls(args.host, args.port)]
+    token, token_created, token_path = load_or_create_token(reset=args.reset_token)
+    urls = candidate_urls(args.host, args.port)
     app = create_app(repo, token, workspace=workspace, initial_projects=projects)
 
     if workspace:
@@ -999,6 +1065,13 @@ def main(argv: list[str] | None = None) -> int:
     print("Serving dashboard:", flush=True)
     for url in urls:
         print(f"  {url}", flush=True)
+    if token_created:
+        print(f"Pairing token: {token}", flush=True)
+        print(f"Token saved in: {token_path}", flush=True)
+        print("After pairing once, bookmark and use the clean URL above.", flush=True)
+    else:
+        print("Use the clean URL above from already paired browsers.", flush=True)
+        print("For a new browser, restart with --reset-token to print a fresh pairing token.", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
 
     if not args.no_open and urls:

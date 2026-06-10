@@ -43,6 +43,14 @@ git-review-dashboard --workspace ~/Development/Python --host 0.0.0.0 --port 8765
 
 Then open `http://<machine-ip>:8765` from another device on the same private network or VPN.
 
+On first launch, the server creates a persistent pairing token in `~/.config/code-review-dashboard/token` and prints the token in the terminal. Open the clean URL, enter the pairing token once, and bookmark the clean URL. After that, the browser uses a long-lived cookie and the same bookmark continues to work across app restarts.
+
+To invalidate existing browser pairings and create a new token:
+
+```bash
+git-review-dashboard --reset-token --host 0.0.0.0 --port 8765
+```
+
 The app is strictly read-only. It shows a repository file tree, color-codes changed/new/deleted files and folders, and runs read-only Git commands such as `git status`, `git diff`, `git show`, `git ls-files`, and `git rev-parse`.
 
 ## Frontend Development
@@ -66,3 +74,4 @@ git-review-dashboard --help
 - `--host HOST`: bind host, defaults to `0.0.0.0`.
 - `--port PORT`: bind port, defaults to `8765`.
 - `--no-open`: do not open a local browser automatically.
+- `--reset-token`: generate a new persistent pairing token and invalidate existing browser cookies.
