@@ -29,6 +29,7 @@ from urllib.parse import quote, unquote
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from starlette.middleware.gzip import GZipMiddleware
 
 
 DEFAULT_HOST = "0.0.0.0"
@@ -75,6 +76,14 @@ class FileStatus:
     old_path: str | None = None
 
 
+@dataclass(frozen=True)
+class Project:
+    id: str
+    name: str
+    path: Path
+    relative_path: str
+
+
 def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
@@ -97,6 +106,50 @@ def detect_repo(start: Path) -> Path:
     if proc.returncode != 0:
         raise DashboardError(f"{start} is not inside a Git repository.")
     return Path(decode_git(proc.stdout).strip()).resolve()
+
+
+def is_git_repo_root(path: Path) -> bool:
+    proc = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return proc.returncode == 0 and Path(decode_git(proc.stdout).strip()).resolve() == path.resolve()
+
+
+def project_id_for_path(workspace: Path, repo: Path) -> str:
+    rel = repo.resolve().relative_to(workspace.resolve())
+    rel_text = rel.as_posix()
+    return "." if rel_text == "." else rel_text
+
+
+def discover_projects(workspace: Path | None, default_repo: Path) -> list[Project]:
+    if workspace is None:
+        return [Project(id=".", name=default_repo.name, path=default_repo, relative_path=".")]
+
+    workspace = workspace.resolve()
+    projects: list[Project] = []
+    ignored_dirs = {".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules", "__pycache__"}
+    for current, dirs, _files in os.walk(workspace):
+        current_path = Path(current).resolve()
+        dirs[:] = [dirname for dirname in dirs if dirname not in ignored_dirs and not dirname.startswith(".cache")]
+        if is_git_repo_root(current_path):
+            project_id = project_id_for_path(workspace, current_path)
+            projects.append(
+                Project(
+                    id=project_id,
+                    name=current_path.name if project_id != "." else workspace.name,
+                    path=current_path,
+                    relative_path=project_id,
+                )
+            )
+            dirs[:] = []
+
+    if default_repo not in [project.path for project in projects] and default_repo.exists() and is_git_repo_root(default_repo):
+        with contextlib.suppress(ValueError):
+            project_id = project_id_for_path(workspace, default_repo)
+            projects.append(Project(id=project_id, name=default_repo.name, path=default_repo, relative_path=project_id))
+    return sorted(projects, key=lambda project: (project.relative_path.lower(), str(project.path).lower()))
 
 
 def has_head(repo: Path) -> bool:
@@ -733,9 +786,56 @@ async def tmux_attach_socket(websocket: WebSocket, session_name: str, rows: int,
             proc.wait(timeout=1)
 
 
-def create_app(repo: Path, token: str) -> FastAPI:
+def create_app(repo: Path, token: str, workspace: Path | None = None, initial_projects: list[Project] | None = None) -> FastAPI:
     app = FastAPI()
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     static_dir = Path(str(resources.files("git_review_dashboard").joinpath("static")))
+    workspace = workspace.resolve() if workspace else None
+    default_project_id = "."
+    if workspace:
+        with contextlib.suppress(ValueError):
+            default_project_id = project_id_for_path(workspace, repo)
+    project_cache = list(initial_projects) if initial_projects is not None else discover_projects(workspace, repo)
+
+    def current_projects(force_refresh: bool = False) -> list[Project]:
+        nonlocal project_cache
+        if force_refresh or not project_cache:
+            project_cache = discover_projects(workspace, repo)
+        return project_cache
+
+    def projects_payload(force_refresh: bool = False) -> dict[str, Any]:
+        projects = current_projects(force_refresh)
+        if not projects:
+            raise NotFoundError("No Git repositories found.")
+        return {
+            "workspace": str(workspace) if workspace else None,
+            "defaultProject": default_project_id if any(project.id == default_project_id for project in projects) else projects[0].id,
+            "projects": [
+                {
+                    "id": project.id,
+                    "name": project.name,
+                    "path": str(project.path),
+                    "relativePath": project.relative_path,
+                }
+                for project in projects
+            ],
+        }
+
+    def resolve_project(raw_project: str | None) -> Path:
+        if workspace is None:
+            if raw_project not in (None, "", "."):
+                raise NotFoundError("Unknown project.")
+            return repo
+
+        projects = current_projects()
+        default_id = default_project_id if any(project.id == default_project_id for project in projects) else projects[0].id
+        project_id = raw_project or default_id
+        if project_id != ".":
+            project_id = normalize_repo_path(project_id)
+        project = {project.id: project for project in projects}.get(project_id)
+        if project is None:
+            raise NotFoundError("Unknown project.")
+        return project.path
 
     @app.middleware("http")
     async def require_token(request: Request, call_next: Any) -> Response:
@@ -744,7 +844,7 @@ def create_app(repo: Path, token: str) -> FastAPI:
                 return JSONResponse({"error": "Unauthorized"}, status_code=HTTPStatus.UNAUTHORIZED)
             return unauthorized_response()
         response = await call_next(request)
-        response.headers["Cache-Control"] = "no-store"
+        response.headers.setdefault("Cache-Control", "no-store")
         if request.query_params.get("token") == token:
             response.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="lax")
         return response
@@ -753,13 +853,17 @@ def create_app(repo: Path, token: str) -> FastAPI:
     async def dashboard_error_handler(_: Request, exc: DashboardError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=exc.status)
 
+    @app.get("/api/projects")
+    async def api_projects(refresh: bool = False) -> dict[str, Any]:
+        return projects_payload(force_refresh=refresh)
+
     @app.get("/api/state")
-    async def api_state() -> dict[str, Any]:
-        return repo_state(repo)
+    async def api_state(project: str | None = None) -> dict[str, Any]:
+        return repo_state(resolve_project(project))
 
     @app.get("/api/file")
-    async def api_file(path: str) -> dict[str, Any]:
-        return file_payload(repo, path)
+    async def api_file(path: str, project: str | None = None) -> dict[str, Any]:
+        return file_payload(resolve_project(project), path)
 
     @app.get("/api/tmux/sessions")
     async def api_tmux_sessions() -> dict[str, Any]:
@@ -793,7 +897,8 @@ def create_app(repo: Path, token: str) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=HTTPStatus.NOT_FOUND) from exc
         if target.is_file():
-            return FileResponse(target, headers={"Cache-Control": "no-store"})
+            cache_control = "private, max-age=31536000, immutable" if asset_path.startswith("assets/") else "no-store"
+            return FileResponse(target, headers={"Cache-Control": cache_control})
         return FileResponse(static_dir / "index.html", headers={"Cache-Control": "no-store"})
 
     return app
@@ -849,6 +954,7 @@ def private_addresses() -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve a read-only mobile Git changes review dashboard.")
     parser.add_argument("--repo", default=os.getcwd(), help="Path inside the Git repository to inspect.")
+    parser.add_argument("--workspace", help="Root folder whose Git repositories can be selected in the UI.")
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"Host/interface to bind, default {DEFAULT_HOST}.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port to bind, default {DEFAULT_PORT}.")
     parser.add_argument("--no-open", action="store_true", help="Do not open a local browser.")
@@ -857,17 +963,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    try:
-        repo = detect_repo(Path(args.repo).resolve())
-    except DashboardError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    workspace: Path | None = None
+    projects: list[Project] | None = None
+    if args.workspace:
+        workspace = Path(args.workspace).resolve()
+        if not workspace.is_dir():
+            print(f"error: {workspace} is not a directory.", file=sys.stderr)
+            return 2
+        repo_candidate: Path | None = None
+        with contextlib.suppress(DashboardError, ValueError):
+            detected = detect_repo(Path(args.repo).resolve())
+            detected.relative_to(workspace)
+            repo_candidate = detected
+        projects = discover_projects(workspace, repo_candidate or workspace)
+        if not projects:
+            print(f"error: no Git repositories found under {workspace}.", file=sys.stderr)
+            return 2
+        repo = repo_candidate or projects[0].path
+    else:
+        try:
+            repo = detect_repo(Path(args.repo).resolve())
+        except DashboardError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     token = secrets.token_urlsafe(32)
     urls = [f"{url}/?token={quote(token)}" for url in candidate_urls(args.host, args.port)]
-    app = create_app(repo, token)
+    app = create_app(repo, token, workspace=workspace, initial_projects=projects)
 
-    print(f"Repository: {repo}", flush=True)
+    if workspace:
+        print(f"Workspace: {workspace}", flush=True)
+        print(f"Default repository: {repo}", flush=True)
+    else:
+        print(f"Repository: {repo}", flush=True)
     print("Serving dashboard:", flush=True)
     for url in urls:
         print(f"  {url}", flush=True)

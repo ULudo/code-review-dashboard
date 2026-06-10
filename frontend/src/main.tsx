@@ -91,6 +91,19 @@ type TmuxSession = {
   created: number;
 };
 
+type Project = {
+  id: string;
+  name: string;
+  path: string;
+  relativePath: string;
+};
+
+type ProjectsPayload = {
+  workspace: string | null;
+  defaultProject: string;
+  projects: Project[];
+};
+
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("css", css);
 hljs.registerLanguage("go", go);
@@ -156,6 +169,8 @@ function useVisibilityRefresh(callback: () => void) {
 function App() {
   const [view, setView] = useState<AppView>("source");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState(() => localStorage.getItem("code-review-dashboard-project") || "");
   const [repoState, setRepoState] = useState<RepoState | null>(null);
   const [selectedPath, setSelectedPath] = useState(() => decodeURIComponent(window.location.hash.slice(1) || ""));
   const [selectedFile, setSelectedFile] = useState<FilePayload | null>(null);
@@ -163,28 +178,55 @@ function App() {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string>("");
 
-  const loadState = useCallback(async () => {
+  const projectQuery = useCallback(() => {
+    return selectedProjectId ? `?project=${encodeURIComponent(selectedProjectId)}` : "";
+  }, [selectedProjectId]);
+
+  const loadProjects = useCallback(async () => {
     try {
-      const payload = await fetchJson<RepoState>("/api/state");
-      setRepoState(payload);
-      setError("");
+      const payload = await fetchJson<ProjectsPayload>("/api/projects");
+      setProjects(payload.projects);
+      setSelectedProjectId((current) => {
+        const next = current && payload.projects.some((project) => project.id === current) ? current : payload.defaultProject;
+        localStorage.setItem("code-review-dashboard-project", next);
+        return next;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   }, []);
 
+  const loadState = useCallback(async () => {
+    try {
+      const payload = await fetchJson<RepoState>(`/api/state${projectQuery()}`);
+      setRepoState(payload);
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [projectQuery]);
+
   useEffect(() => {
+    loadProjects();
+  }, [loadProjects]);
+
+  useEffect(() => {
+    if (!selectedProjectId) return;
     loadState();
     const timer = window.setInterval(loadState, 5000);
     return () => window.clearInterval(timer);
-  }, [loadState]);
+  }, [loadState, selectedProjectId]);
 
   useVisibilityRefresh(loadState);
 
   useEffect(() => {
     if (!selectedPath) return;
     let cancelled = false;
-    fetchJson<FilePayload>(`/api/file?path=${encodeURIComponent(selectedPath)}`)
+    const params = new URLSearchParams({ path: selectedPath });
+    if (selectedProjectId) {
+      params.set("project", selectedProjectId);
+    }
+    fetchJson<FilePayload>(`/api/file?${params.toString()}`)
       .then((payload) => {
         if (!cancelled) {
           setSelectedFile(payload);
@@ -197,7 +239,16 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedPath, repoState]);
+  }, [selectedPath, repoState, selectedProjectId]);
+
+  const switchProject = (projectId: string) => {
+    setSelectedProjectId(projectId);
+    localStorage.setItem("code-review-dashboard-project", projectId);
+    setSelectedPath("");
+    setSelectedFile(null);
+    setCollapsed(new Set());
+    history.replaceState(null, "", location.pathname);
+  };
 
   const selectedExists = useMemo(() => {
     if (!repoState || !selectedPath) return false;
@@ -243,6 +294,20 @@ function App() {
           <div className="title-stack">
             <span className="section-label">Explorer</span>
             <h1>{repoState ? basename(repoState.repo) : "Loading..."}</h1>
+            {projects.length > 1 && (
+              <select
+                className="project-select"
+                value={selectedProjectId}
+                onChange={(event) => switchProject(event.target.value)}
+                aria-label="Project"
+              >
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.relativePath}
+                  </option>
+                ))}
+              </select>
+            )}
             <div className="meta-line">
               <span>{repoState?.branch || ""}</span>
               <span>{repoState ? `${repoState.counts.all} files, ${repoState.counts.total} changed` : ""}</span>

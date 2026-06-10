@@ -35,6 +35,12 @@ Launch it from any folder inside a Git repository:
 git-review-dashboard --host 0.0.0.0 --port 8765
 ```
 
+Or launch one server for multiple repositories under a workspace folder:
+
+```bash
+git-review-dashboard --workspace ~/Development/Python --host 0.0.0.0 --port 8765
+```
+
 Then open `http://<machine-ip>:8765` from another device on the same private network or VPN.
 
 The app is strictly read-only. It shows a repository file tree, color-codes changed/new/deleted files and folders, and runs read-only Git commands such as `git status`, `git diff`, `git show`, `git ls-files`, and `git rev-parse`.
@@ -56,6 +62,7 @@ git-review-dashboard --help
 ```
 
 - `--repo PATH`: repository or subdirectory to inspect, defaults to the current directory.
+- `--workspace PATH`: discover Git repositories below this folder and switch between them in the UI.
 - `--host HOST`: bind host, defaults to `0.0.0.0`.
 - `--port PORT`: bind port, defaults to `8765`.
 - `--no-open`: do not open a local browser automatically.
