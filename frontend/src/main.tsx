@@ -491,14 +491,16 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   const fitRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const composerInputRef = useRef<HTMLInputElement | null>(null);
+  const historyLayerRef = useRef<HTMLPreElement | null>(null);
   const composeOpenRef = useRef(false);
-  const resizeLockedRef = useRef(false);
   const composerActionHandledRef = useRef(false);
   const composerComposingRef = useRef(false);
   const composeTextRef = useRef("");
+  const historyOpenRef = useRef(false);
   const useMobileInput = useMemo(() => window.matchMedia("(pointer: coarse)").matches, []);
-  const lastTouchY = useRef<number | null>(null);
   const [status, setStatus] = useState("Connecting");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyText, setHistoryText] = useState("");
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectionText, setSelectionText] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
@@ -515,10 +517,6 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     }
   };
 
-  const terminalViewportHeight = () => {
-    return composeOpenRef.current ? window.visualViewport?.height ?? window.innerHeight : window.innerHeight;
-  };
-
   useEffect(() => {
     composeOpenRef.current = composeOpen;
   }, [composeOpen]);
@@ -528,14 +526,74 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   }, [composeText]);
 
   useEffect(() => {
+    historyOpenRef.current = historyOpen;
+  }, [historyOpen]);
+
+  const historyIsAtBottom = () => {
+    const layer = historyLayerRef.current;
+    if (!layer) return true;
+    return layer.scrollHeight - layer.scrollTop - layer.clientHeight < 24;
+  };
+
+  const scrollHistoryToBottom = () => {
+    window.requestAnimationFrame(() => {
+      const layer = historyLayerRef.current;
+      if (layer) layer.scrollTop = layer.scrollHeight;
+    });
+  };
+
+  const loadHistory = useCallback(async (forceBottom = false) => {
+    const followBottom = forceBottom || historyIsAtBottom();
+    try {
+      const payload = await fetchJson<{ text: string }>(`/api/tmux/capture?session=${encodeURIComponent(session)}&lines=8000`);
+      setHistoryText(payload.text || "");
+      if (followBottom) scrollHistoryToBottom();
+    } catch (err) {
+      setHistoryText(err instanceof Error ? err.message : String(err));
+    }
+  }, [session]);
+
+  const openHistory = useCallback((forceBottom = true) => {
+    if (selectionMode) return;
+    if (composeOpenRef.current) {
+      composeOpenRef.current = false;
+      setComposeOpen(false);
+    }
+    historyOpenRef.current = true;
+    setHistoryOpen(true);
+    loadHistory(forceBottom);
+  }, [loadHistory, selectionMode]);
+
+  const closeHistory = useCallback(() => {
+    historyOpenRef.current = false;
+    setHistoryOpen(false);
+    terminalRef.current?.scrollToBottom();
+  }, []);
+
+  useEffect(() => {
+    if (!historyOpen) return;
+    const timer = window.setInterval(() => loadHistory(false), 1800);
+    return () => window.clearInterval(timer);
+  }, [historyOpen, loadHistory]);
+
+  useEffect(() => {
     if (!composeOpen) return;
     const keepPagePinned = () => window.scrollTo(0, 0);
+    const updateComposeBottom = () => {
+      const viewport = window.visualViewport;
+      const bottom = viewport ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop) : 0;
+      document.documentElement.style.setProperty("--terminal-compose-bottom", `${bottom}px`);
+    };
     keepPagePinned();
+    updateComposeBottom();
     window.addEventListener("scroll", keepPagePinned, { passive: true });
-    window.visualViewport?.addEventListener("scroll", keepPagePinned, { passive: true });
+    window.visualViewport?.addEventListener("resize", updateComposeBottom, { passive: true });
+    window.visualViewport?.addEventListener("scroll", updateComposeBottom, { passive: true });
     return () => {
       window.removeEventListener("scroll", keepPagePinned);
-      window.visualViewport?.removeEventListener("scroll", keepPagePinned);
+      window.visualViewport?.removeEventListener("resize", updateComposeBottom);
+      window.visualViewport?.removeEventListener("scroll", updateComposeBottom);
+      document.documentElement.style.removeProperty("--terminal-compose-bottom");
       keepPagePinned();
     };
   }, [composeOpen]);
@@ -624,13 +682,10 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
 
     let resizeTimer = 0;
     const onResize = () => {
+      if (composeOpenRef.current) return;
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
-        fitAddon.fit();
-        const socket = socketRef.current;
-        if (socket && !composeOpenRef.current) {
-          sendTerminalSize(socket, terminal, fitAddon);
-        }
+        sendStableTerminalSize();
       }, 160);
     };
     window.addEventListener("resize", onResize);
@@ -648,44 +703,45 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     };
   }, [session, useMobileInput]);
 
+  const sendStableTerminalSize = () => {
+    fitTerminal(true);
+  };
+
   useEffect(() => {
     let resizeTimer = 0;
     const updateViewportHeight = () => {
-      document.documentElement.style.setProperty("--terminal-height", `${terminalViewportHeight()}px`);
+      if (composeOpenRef.current) return;
+      document.documentElement.style.setProperty("--terminal-height", `${window.innerHeight}px`);
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
-        fitRef.current?.fit();
-        const socket = socketRef.current;
-        const terminal = terminalRef.current;
-        const fitAddon = fitRef.current;
-        if (socket && terminal && fitAddon && !composeOpenRef.current) {
-          sendTerminalSize(socket, terminal, fitAddon);
-        }
+        sendStableTerminalSize();
       }, 220);
     };
     updateViewportHeight();
-    window.visualViewport?.addEventListener("resize", updateViewportHeight);
+    window.addEventListener("resize", updateViewportHeight);
     return () => {
-      window.visualViewport?.removeEventListener("resize", updateViewportHeight);
+      window.removeEventListener("resize", updateViewportHeight);
       window.clearTimeout(resizeTimer);
       document.documentElement.style.removeProperty("--terminal-height");
     };
   }, []);
 
   useEffect(() => {
-    if (composeOpen) return;
-    document.documentElement.style.setProperty("--terminal-height", `${terminalViewportHeight()}px`);
-    window.setTimeout(() => {
-      fitTerminal(true);
-    }, 160);
-  }, [composeOpen]);
-
-  const sendTmuxNavigation = (action: string, count = 5) => {
-    const socket = socketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "tmux", action, count }));
+    if (composeOpen) {
+      terminalRef.current?.scrollToBottom();
+      return;
     }
-  };
+    const schedule = [120, 320, 650];
+    schedule.forEach((delay) => {
+      window.setTimeout(() => {
+        if (!composeOpenRef.current) {
+          document.documentElement.style.setProperty("--terminal-height", `${window.innerHeight}px`);
+          sendStableTerminalSize();
+          terminalRef.current?.scrollToBottom();
+        }
+      }, delay);
+    });
+  }, [composeOpen]);
 
   const focusTerminal = () => {
     if (selectionMode) return;
@@ -700,15 +756,6 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     }
   };
 
-  const setResizeLock = (locked: boolean) => {
-    if (resizeLockedRef.current === locked) return;
-    resizeLockedRef.current = locked;
-    const socket = socketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "resize-lock", locked }));
-    }
-  };
-
   const focusComposerInput = () => {
     composerInputRef.current?.focus({ preventScroll: true });
   };
@@ -719,8 +766,9 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       focusComposerInput();
       return;
     }
+    closeHistory();
     composeOpenRef.current = true;
-    setResizeLock(true);
+    terminalRef.current?.scrollToBottom();
     flushSync(() => {
       setComposeOpen(true);
     });
@@ -738,7 +786,6 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
 
   const closeComposer = (clearText = true) => {
     if (!composeOpenRef.current && !composeOpen) {
-      setResizeLock(false);
       return;
     }
     composeOpenRef.current = false;
@@ -747,12 +794,6 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       composeTextRef.current = "";
       setComposeText("");
     }
-    window.setTimeout(() => {
-      fitTerminal(false);
-      setResizeLock(false);
-      fitTerminal(true);
-      window.setTimeout(() => fitTerminal(true), 220);
-    }, 180);
   };
 
   const sendTextDelta = (previous: string, next: string) => {
@@ -786,6 +827,8 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   };
 
   const sendEnter = () => {
+    closeHistory();
+    terminalRef.current?.scrollToBottom();
     sendInput("\r");
     composeTextRef.current = "";
     setComposeText("");
@@ -832,43 +875,28 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   };
 
   const handleTerminalWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (selectionMode) return;
+    if (selectionMode || !historyOpenRef.current) return;
     if (Math.abs(event.deltaY) < 4) return;
     event.preventDefault();
-    const count = Math.min(50, Math.max(3, Math.round(Math.abs(event.deltaY) / 8)));
-    sendTmuxNavigation(event.deltaY < 0 ? "scroll-up" : "scroll-down", count);
+    const layer = historyLayerRef.current;
+    if (layer) layer.scrollTop += event.deltaY;
   };
 
   const handleMobilePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!useMobileInput || selectionMode) return;
-    event.preventDefault();
-    event.stopPropagation();
     if (composeOpenRef.current) {
+      event.preventDefault();
+      event.stopPropagation();
       focusComposerInput();
-      return;
     }
   };
 
-  const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
-    if (selectionMode) return;
-    lastTouchY.current = event.touches[0]?.clientY ?? null;
-  };
-
-  const handleTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
-    if (selectionMode) return;
-    const currentY = event.touches[0]?.clientY;
-    const previousY = lastTouchY.current;
-    if (currentY == null || previousY == null) return;
-    const delta = currentY - previousY;
-    if (Math.abs(delta) < 14) return;
-    event.preventDefault();
-    const count = Math.min(30, Math.max(3, Math.round(Math.abs(delta) / 6)));
-    sendTmuxNavigation(delta > 0 ? "scroll-up" : "scroll-down", count);
-    lastTouchY.current = currentY;
-  };
-
-  const handleTouchEnd = () => {
-    lastTouchY.current = null;
+  const toggleHistory = () => {
+    if (historyOpenRef.current) {
+      closeHistory();
+      return;
+    }
+    openHistory(true);
   };
 
   const toggleSelectionMode = () => {
@@ -879,6 +907,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       return;
     }
     closeComposer(false);
+    closeHistory();
     setSelectionText(terminalBufferText(terminal));
     setSelectionMode(true);
   };
@@ -900,6 +929,9 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
               Text
             </button>
           )}
+          <button className={`source-button ${historyOpen ? "active" : ""}`} type="button" onClick={toggleHistory}>
+            {historyOpen ? "Live" : "History"}
+          </button>
           <button className={`source-button ${selectionMode ? "active" : ""}`} type="button" onClick={toggleSelectionMode}>
             {selectionMode ? "Live" : "Select"}
           </button>
@@ -912,10 +944,16 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
           onClick={focusTerminal}
           onPointerDownCapture={handleMobilePointerDown}
           onWheel={handleTerminalWheel}
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
         />
+        {historyOpen && (
+          <pre
+            ref={historyLayerRef}
+            className="terminal-history-layer"
+            aria-label="Terminal scrollback"
+          >
+            {historyText || "No terminal history available."}
+          </pre>
+        )}
         {selectionMode && (
           <textarea
             className="terminal-selection-layer"

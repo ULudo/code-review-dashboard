@@ -652,26 +652,18 @@ def create_tmux_session(name: str) -> dict[str, Any]:
     return {"name": session_name, "windows": 1, "attached": 0, "created": 0}
 
 
-def send_tmux_navigation(session_name: str, action: str, count: int = 5) -> None:
+def capture_tmux_pane(session_name: str, lines: int = 5000) -> str:
     session = validate_session_name(session_name)
-    count = max(1, min(int(count), 200))
-    if action == "live":
-        tmux_command("send-keys", "-t", session, "-X", "cancel", check=False)
-        return
-    command_by_action = {
-        "scroll-up": "scroll-up",
-        "scroll-down": "scroll-down",
-        "page-up": "page-up",
-        "page-down": "page-down",
-    }
-    command = command_by_action.get(action)
-    if command is None:
-        return
-    tmux_command("copy-mode", "-t", session, check=False)
-    if action.startswith("page-"):
-        tmux_command("send-keys", "-t", session, "-X", command, check=False)
-    else:
-        tmux_command("send-keys", "-t", session, "-X", "-N", str(count), command, check=False)
+    lines = max(100, min(int(lines), 20000))
+    proc = tmux_command("capture-pane", "-t", session, "-p", "-J", "-S", f"-{lines}", check=False)
+    if proc.returncode != 0:
+        raise DashboardError(decode_git(proc.stderr).strip() or "Unable to capture tmux pane.")
+    return decode_git(proc.stdout).rstrip()
+
+
+def cancel_tmux_copy_mode(session_name: str) -> None:
+    session = validate_session_name(session_name)
+    tmux_command("send-keys", "-t", session, "-X", "cancel", check=False)
 
 
 def tmux_option(session_name: str, option: str) -> str | None:
@@ -752,7 +744,7 @@ def refresh_tmux_client_size(client_name: str, rows: int, cols: int) -> None:
 
 async def tmux_attach_socket(websocket: WebSocket, session_name: str, rows: int, cols: int) -> None:
     session = validate_session_name(session_name)
-    send_tmux_navigation(session, "live")
+    cancel_tmux_copy_mode(session)
     previous_status = tmux_option(session, "status")
     set_tmux_option(session, "status", "off")
     master_fd, slave_fd = pty.openpty()
@@ -805,20 +797,13 @@ async def tmux_attach_socket(websocket: WebSocket, session_name: str, rows: int,
             await websocket.send_text(data.decode("utf-8", "replace"))
 
     async def receive_input() -> None:
-        resize_locked = False
         while True:
             payload = await websocket.receive_json()
             message_type = payload.get("type")
             if message_type == "input":
-                send_tmux_navigation(session, "live")
+                cancel_tmux_copy_mode(session)
                 os.write(master_fd, str(payload.get("data", "")).encode("utf-8", "replace"))
-            elif message_type == "tmux":
-                send_tmux_navigation(session, str(payload.get("action", "")), int(payload.get("count", 5)))
-            elif message_type == "resize-lock":
-                resize_locked = bool(payload.get("locked"))
             elif message_type == "resize":
-                if resize_locked:
-                    continue
                 next_rows = int(payload.get("rows", 30))
                 next_cols = int(payload.get("cols", 100))
                 set_winsize(master_fd, next_rows, next_cols)
@@ -939,6 +924,10 @@ def create_app(repo: Path, token: str, workspace: Path | None = None, initial_pr
         payload = await request.json()
         session = create_tmux_session(str(payload.get("name", "")))
         return {"session": session, "sessions": list_tmux_sessions()}
+
+    @app.get("/api/tmux/capture")
+    async def api_tmux_capture(session: str, lines: int = 5000) -> dict[str, Any]:
+        return {"text": capture_tmux_pane(session, lines)}
 
     @app.websocket("/api/tmux/attach")
     async def api_tmux_attach(websocket: WebSocket) -> None:
