@@ -11,14 +11,15 @@ import posixpath
 import pty
 import re
 import secrets
-import shutil
 import signal
 import socket
 import struct
 import subprocess
 import sys
 import termios
+import time
 import webbrowser
+from collections import deque
 from dataclasses import dataclass
 from http import HTTPStatus
 from importlib import resources
@@ -592,17 +593,6 @@ def file_payload(repo: Path, raw_path: str) -> dict[str, Any]:
     }
 
 
-def tmux_command(*args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
-    if shutil.which("tmux") is None:
-        raise DashboardError("tmux is not installed or not available on PATH.")
-    return subprocess.run(
-        ["tmux", *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=check,
-    )
-
-
 def validate_session_name(name: str) -> str:
     name = name.strip()
     if not SESSION_NAME_RE.fullmatch(name):
@@ -610,77 +600,195 @@ def validate_session_name(name: str) -> str:
     return name
 
 
-def list_tmux_sessions() -> list[dict[str, Any]]:
-    proc = tmux_command(
-        "list-sessions",
-        "-F",
-        "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}",
-        check=False,
-    )
-    if proc.returncode != 0:
-        stderr = decode_git(proc.stderr).lower()
-        if "no server running" in stderr:
-            return []
-        raise DashboardError(decode_git(proc.stderr).strip() or "Unable to list tmux sessions.")
+class TerminalSession:
+    max_buffer_bytes = 4_000_000
 
-    sessions = []
-    for line in decode_git(proc.stdout).splitlines():
-        parts = line.split("\t")
-        if len(parts) != 4:
-            continue
-        name, windows, attached, created = parts
-        sessions.append(
-            {
-                "name": name,
-                "windows": int(windows or "0"),
-                "attached": int(attached or "0"),
-                "created": int(created or "0"),
-            }
+    def __init__(self, name: str, cwd: Path, rows: int, cols: int) -> None:
+        self.name = validate_session_name(name)
+        self.cwd = cwd
+        self.created = time.time()
+        self.master_fd = -1
+        self.proc: subprocess.Popen[bytes] | None = None
+        self.closed = False
+        self.rows = rows
+        self.cols = cols
+        self._buffer: deque[bytes] = deque()
+        self._buffer_size = 0
+        self._subscribers: set[asyncio.Queue[bytes | None]] = set()
+
+    def start(self) -> None:
+        master_fd, slave_fd = pty.openpty()
+        self.master_fd = master_fd
+        set_winsize(master_fd, self.rows, self.cols)
+
+        def prepare_child_terminal() -> None:
+            os.setsid()
+            with contextlib.suppress(OSError):
+                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+
+        shell = os.environ.get("SHELL") or "/bin/bash"
+        env = {
+            **os.environ,
+            "TERM": "xterm-256color",
+            "COLORTERM": os.environ.get("COLORTERM", "truecolor"),
+        }
+        self.proc = subprocess.Popen(
+            [shell],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            cwd=self.cwd,
+            close_fds=True,
+            env=env,
+            preexec_fn=prepare_child_terminal,
         )
-    return sorted(sessions, key=lambda item: item["name"].lower())
+        os.close(slave_fd)
+        os.set_blocking(master_fd, False)
+        asyncio.get_running_loop().add_reader(master_fd, self._read_available)
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "attached": len(self._subscribers),
+            "created": self.created,
+            "cwd": str(self.cwd),
+            "running": self.is_running(),
+        }
+
+    def is_running(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None and not self.closed
+
+    def replay_buffer(self) -> bytes:
+        return b"".join(self._buffer)
+
+    def subscribe(self) -> asyncio.Queue[bytes | None]:
+        queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[bytes | None]) -> None:
+        self._subscribers.discard(queue)
+
+    def write(self, data: str) -> None:
+        if self.closed or self.master_fd < 0:
+            return
+        with contextlib.suppress(OSError):
+            os.write(self.master_fd, data.encode("utf-8", "replace"))
+
+    def resize(self, rows: int, cols: int) -> None:
+        if self.closed or self.master_fd < 0:
+            return
+        self.rows = max(1, min(rows, 200))
+        self.cols = max(1, min(cols, 400))
+        set_winsize(self.master_fd, self.rows, self.cols)
+        with contextlib.suppress(OSError):
+            os.killpg(self.proc.pid, signal.SIGWINCH) if self.proc else None
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        loop = asyncio.get_running_loop()
+        if self.master_fd >= 0:
+            with contextlib.suppress(ValueError, OSError):
+                loop.remove_reader(self.master_fd)
+        for queue in list(self._subscribers):
+            queue.put_nowait(None)
+        self._subscribers.clear()
+        if self.proc and self.proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.proc.pid, signal.SIGHUP)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self.proc.wait(timeout=1)
+            if self.proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+        if self.master_fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(self.master_fd)
+            self.master_fd = -1
+
+    def _read_available(self) -> None:
+        while True:
+            try:
+                data = os.read(self.master_fd, 8192)
+            except BlockingIOError:
+                return
+            except OSError:
+                self._mark_exited()
+                return
+            if not data:
+                self._mark_exited()
+                return
+            self._append_buffer(data)
+            for queue in list(self._subscribers):
+                queue.put_nowait(data)
+
+    def _append_buffer(self, data: bytes) -> None:
+        self._buffer.append(data)
+        self._buffer_size += len(data)
+        while self._buffer_size > self.max_buffer_bytes and self._buffer:
+            self._buffer_size -= len(self._buffer.popleft())
+
+    def _mark_exited(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        with contextlib.suppress(ValueError, OSError):
+            asyncio.get_running_loop().remove_reader(self.master_fd)
+        for queue in list(self._subscribers):
+            queue.put_nowait(None)
+        self._subscribers.clear()
+        if self.master_fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(self.master_fd)
+            self.master_fd = -1
 
 
-def create_tmux_session(name: str) -> dict[str, Any]:
-    session_name = validate_session_name(name)
-    proc = tmux_command("new-session", "-d", "-s", session_name, check=False)
-    if proc.returncode != 0:
-        message = decode_git(proc.stderr).strip() or f"Unable to create tmux session {session_name}."
-        raise DashboardError(message)
-    for session in list_tmux_sessions():
-        if session["name"] == session_name:
-            return session
-    return {"name": session_name, "windows": 1, "attached": 0, "created": 0}
+class TerminalSessionManager:
+    def __init__(self, cwd: Path) -> None:
+        self.cwd = cwd
+        self.sessions: dict[str, TerminalSession] = {}
 
+    def list_sessions(self) -> list[dict[str, Any]]:
+        self._prune_exited()
+        return sorted((session.payload() for session in self.sessions.values()), key=lambda item: item["name"].lower())
 
-def capture_tmux_pane(session_name: str, lines: int = 5000) -> str:
-    session = validate_session_name(session_name)
-    lines = max(100, min(int(lines), 20000))
-    proc = tmux_command("capture-pane", "-t", session, "-p", "-J", "-S", f"-{lines}", check=False)
-    if proc.returncode != 0:
-        raise DashboardError(decode_git(proc.stderr).strip() or "Unable to capture tmux pane.")
-    return decode_git(proc.stdout).rstrip()
+    def create_session(self, name: str, rows: int = 30, cols: int = 100) -> TerminalSession:
+        session_name = validate_session_name(name)
+        self._prune_exited()
+        if session_name in self.sessions:
+            raise DashboardError(f"Session {session_name} already exists.")
+        session = TerminalSession(session_name, self.cwd, rows, cols)
+        session.start()
+        self.sessions[session_name] = session
+        return session
 
+    def get_session(self, name: str) -> TerminalSession:
+        session_name = validate_session_name(name)
+        session = self.sessions.get(session_name)
+        if session is None or not session.is_running():
+            self.sessions.pop(session_name, None)
+            raise NotFoundError("Unknown terminal session.")
+        return session
 
-def cancel_tmux_copy_mode(session_name: str) -> None:
-    session = validate_session_name(session_name)
-    tmux_command("send-keys", "-t", session, "-X", "cancel", check=False)
+    def stop_session(self, name: str) -> None:
+        session_name = validate_session_name(name)
+        session = self.sessions.pop(session_name, None)
+        if session is None:
+            raise NotFoundError("Unknown terminal session.")
+        session.close()
 
+    def close_all(self) -> None:
+        for session in list(self.sessions.values()):
+            session.close()
+        self.sessions.clear()
 
-def tmux_option(session_name: str, option: str) -> str | None:
-    session = validate_session_name(session_name)
-    if option == "status":
-        proc = tmux_command("display-message", "-p", "-t", session, "#{status}", check=False)
-        if proc.returncode == 0:
-            return decode_git(proc.stdout).strip()
-    proc = tmux_command("show-options", "-qv", "-t", session, option, check=False)
-    if proc.returncode != 0:
-        return None
-    return decode_git(proc.stdout).strip()
-
-
-def set_tmux_option(session_name: str, option: str, value: str) -> None:
-    session = validate_session_name(session_name)
-    tmux_command("set-option", "-q", "-t", session, option, value, check=False)
+    def _prune_exited(self) -> None:
+        for name, session in list(self.sessions.items()):
+            if not session.is_running():
+                session.close()
+                self.sessions.pop(name, None)
 
 
 def token_is_valid(request: Request, token: str) -> bool:
@@ -736,58 +844,12 @@ def set_winsize(fd: int, rows: int, cols: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-def refresh_tmux_client_size(client_name: str, rows: int, cols: int) -> None:
-    rows = max(1, min(rows, 200))
-    cols = max(1, min(cols, 400))
-    tmux_command("refresh-client", "-t", client_name, "-C", f"{cols}x{rows}", check=False)
-
-
-async def tmux_attach_socket(websocket: WebSocket, session_name: str, rows: int, cols: int) -> None:
-    session = validate_session_name(session_name)
-    cancel_tmux_copy_mode(session)
-    previous_status = tmux_option(session, "status")
-    set_tmux_option(session, "status", "off")
-    master_fd, slave_fd = pty.openpty()
-    slave_name = os.ttyname(slave_fd)
-    set_winsize(master_fd, rows, cols)
-
-    def prepare_child_terminal() -> None:
-        os.setsid()
-        with contextlib.suppress(OSError):
-            fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
-
-    env = {**os.environ, "TERM": "xterm-256color"}
-    proc = subprocess.Popen(
-        ["tmux", "attach-session", "-t", session],
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        close_fds=True,
-        env=env,
-        preexec_fn=prepare_child_terminal,
-    )
-    os.close(slave_fd)
-    os.set_blocking(master_fd, False)
-    refresh_tmux_client_size(slave_name, rows, cols)
-
-    loop = asyncio.get_running_loop()
-    output_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-
-    def read_pty() -> None:
-        try:
-            while True:
-                try:
-                    data = os.read(master_fd, 8192)
-                except BlockingIOError:
-                    break
-                if not data:
-                    output_queue.put_nowait(None)
-                    break
-                output_queue.put_nowait(data)
-        except OSError:
-            output_queue.put_nowait(None)
-
-    loop.add_reader(master_fd, read_pty)
+async def terminal_attach_socket(websocket: WebSocket, session: TerminalSession, rows: int, cols: int) -> None:
+    session.resize(rows, cols)
+    output_queue = session.subscribe()
+    replay = session.replay_buffer()
+    if replay:
+        await websocket.send_text(replay.decode("utf-8", "replace"))
 
     async def send_output() -> None:
         while True:
@@ -801,13 +863,11 @@ async def tmux_attach_socket(websocket: WebSocket, session_name: str, rows: int,
             payload = await websocket.receive_json()
             message_type = payload.get("type")
             if message_type == "input":
-                cancel_tmux_copy_mode(session)
-                os.write(master_fd, str(payload.get("data", "")).encode("utf-8", "replace"))
+                session.write(str(payload.get("data", "")))
             elif message_type == "resize":
                 next_rows = int(payload.get("rows", 30))
                 next_cols = int(payload.get("cols", 100))
-                set_winsize(master_fd, next_rows, next_cols)
-                refresh_tmux_client_size(slave_name, next_rows, next_cols)
+                session.resize(next_rows, next_cols)
 
     output_task = asyncio.create_task(send_output())
     input_task = asyncio.create_task(receive_input())
@@ -820,15 +880,7 @@ async def tmux_attach_socket(websocket: WebSocket, session_name: str, rows: int,
         for task in pending:
             task.cancel()
     finally:
-        loop.remove_reader(master_fd)
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGHUP)
-        if previous_status in {"on", "off", "2", "3", "4", "5"}:
-            set_tmux_option(session, "status", previous_status)
-        with contextlib.suppress(OSError):
-            os.close(master_fd)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=1)
+        session.unsubscribe(output_queue)
 
 
 def create_app(repo: Path, token: str, workspace: Path | None = None, initial_projects: list[Project] | None = None) -> FastAPI:
@@ -841,6 +893,7 @@ def create_app(repo: Path, token: str, workspace: Path | None = None, initial_pr
         with contextlib.suppress(ValueError):
             default_project_id = project_id_for_path(workspace, repo)
     project_cache = list(initial_projects) if initial_projects is not None else discover_projects(workspace, repo)
+    terminal_sessions = TerminalSessionManager(repo)
 
     def current_projects(force_refresh: bool = False) -> list[Project]:
         nonlocal project_cache
@@ -903,6 +956,10 @@ def create_app(repo: Path, token: str, workspace: Path | None = None, initial_pr
     async def dashboard_error_handler(_: Request, exc: DashboardError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=exc.status)
 
+    @app.on_event("shutdown")
+    async def shutdown_terminal_sessions() -> None:
+        terminal_sessions.close_all()
+
     @app.get("/api/projects")
     async def api_projects(refresh: bool = False) -> dict[str, Any]:
         return projects_payload(force_refresh=refresh)
@@ -915,33 +972,41 @@ def create_app(repo: Path, token: str, workspace: Path | None = None, initial_pr
     async def api_file(path: str, project: str | None = None) -> dict[str, Any]:
         return file_payload(resolve_project(project), path)
 
-    @app.get("/api/tmux/sessions")
-    async def api_tmux_sessions() -> dict[str, Any]:
-        return {"sessions": list_tmux_sessions()}
+    @app.get("/api/terminal/sessions")
+    async def api_terminal_sessions() -> dict[str, Any]:
+        return {"sessions": terminal_sessions.list_sessions()}
 
-    @app.post("/api/tmux/sessions")
-    async def api_create_tmux_session(request: Request) -> dict[str, Any]:
+    @app.post("/api/terminal/sessions")
+    async def api_create_terminal_session(request: Request) -> dict[str, Any]:
         payload = await request.json()
-        session = create_tmux_session(str(payload.get("name", "")))
-        return {"session": session, "sessions": list_tmux_sessions()}
+        rows = int(payload.get("rows", 30))
+        cols = int(payload.get("cols", 100))
+        session = terminal_sessions.create_session(str(payload.get("name", "")), rows=rows, cols=cols)
+        return {"session": session.payload(), "sessions": terminal_sessions.list_sessions()}
 
-    @app.get("/api/tmux/capture")
-    async def api_tmux_capture(session: str, lines: int = 5000) -> dict[str, Any]:
-        return {"text": capture_tmux_pane(session, lines)}
+    @app.delete("/api/terminal/sessions/{session_name}")
+    async def api_stop_terminal_session(session_name: str) -> dict[str, Any]:
+        terminal_sessions.stop_session(session_name)
+        return {"sessions": terminal_sessions.list_sessions()}
 
-    @app.websocket("/api/tmux/attach")
-    async def api_tmux_attach(websocket: WebSocket) -> None:
+    @app.websocket("/api/terminal/attach")
+    async def api_terminal_attach(websocket: WebSocket) -> None:
         if not websocket_token_is_valid(websocket, token):
             await websocket.close(code=1008)
             return
-        session = websocket.query_params.get("session")
-        if not session:
+        session_name = websocket.query_params.get("session")
+        if not session_name:
             await websocket.close(code=1008)
             return
         rows = int(websocket.query_params.get("rows", 30))
         cols = int(websocket.query_params.get("cols", 80))
+        try:
+            session = terminal_sessions.get_session(session_name)
+        except DashboardError:
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
-        await tmux_attach_socket(websocket, session, rows, cols)
+        await terminal_attach_socket(websocket, session, rows, cols)
 
     @app.get("/{asset_path:path}")
     async def static_asset(asset_path: str) -> FileResponse:

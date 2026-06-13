@@ -84,11 +84,12 @@ type DiffLine = {
   kind: "meta" | "hunk" | "added" | "deleted" | "context";
 };
 
-type TmuxSession = {
+type TerminalSession = {
   name: string;
-  windows: number;
   attached: number;
   created: number;
+  cwd: string;
+  running: boolean;
 };
 
 type Project = {
@@ -391,7 +392,7 @@ function App() {
 }
 
 function TerminalView({ onSource }: { onSource: () => void }) {
-  const [sessions, setSessions] = useState<TmuxSession[]>([]);
+  const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSession, setActiveSession] = useState<string>("");
   const [newSessionName, setNewSessionName] = useState("");
   const [error, setError] = useState("");
@@ -399,7 +400,7 @@ function TerminalView({ onSource }: { onSource: () => void }) {
 
   const loadSessions = useCallback(async () => {
     try {
-      const payload = await fetchJson<{ sessions: TmuxSession[] }>("/api/tmux/sessions");
+      const payload = await fetchJson<{ sessions: TerminalSession[] }>("/api/terminal/sessions");
       setSessions(payload.sessions);
       setError("");
     } catch (err) {
@@ -418,7 +419,7 @@ function TerminalView({ onSource }: { onSource: () => void }) {
     const name = newSessionName.trim();
     if (!name) return;
     try {
-      const payload = await fetchJson<{ session: TmuxSession; sessions: TmuxSession[] }>("/api/tmux/sessions", {
+      const payload = await fetchJson<{ session: TerminalSession; sessions: TerminalSession[] }>("/api/terminal/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
@@ -441,7 +442,7 @@ function TerminalView({ onSource }: { onSource: () => void }) {
       <header className="terminal-header">
         <div className="title-stack">
           <span className="section-label">Terminal</span>
-          <h1>tmux sessions</h1>
+          <h1>terminal sessions</h1>
           <div className="meta-line"><span>{sessions.length} sessions</span></div>
         </div>
         <div className="menu-wrap">
@@ -475,10 +476,10 @@ function TerminalView({ onSource }: { onSource: () => void }) {
             <button className="session-row" type="button" key={session.name} onClick={() => setActiveSession(session.name)}>
               <span className="codicon codicon-terminal" />
               <span className="session-name">{session.name}</span>
-              <span className="session-meta">{session.windows} win · {session.attached} attached</span>
+              <span className="session-meta">{session.attached} attached</span>
             </button>
           ))}
-          {!sessions.length && !error && <div className="empty-state">No tmux sessions.</div>}
+          {!sessions.length && !error && <div className="empty-state">No terminal sessions.</div>}
         </div>
       </section>
     </main>
@@ -491,16 +492,16 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   const fitRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const composerInputRef = useRef<HTMLInputElement | null>(null);
-  const historyLayerRef = useRef<HTMLPreElement | null>(null);
   const composeOpenRef = useRef(false);
   const composerActionHandledRef = useRef(false);
   const composerComposingRef = useRef(false);
   const composeTextRef = useRef("");
-  const historyOpenRef = useRef(false);
+  const ctrlActiveRef = useRef(false);
+  const initialViewportHeightRef = useRef(window.innerHeight);
   const useMobileInput = useMemo(() => window.matchMedia("(pointer: coarse)").matches, []);
   const [status, setStatus] = useState("Connecting");
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [historyText, setHistoryText] = useState("");
+  const [ctrlActive, setCtrlActive] = useState(false);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectionText, setSelectionText] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
@@ -526,55 +527,71 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   }, [composeText]);
 
   useEffect(() => {
-    historyOpenRef.current = historyOpen;
-  }, [historyOpen]);
+    if (!useMobileInput) return;
 
-  const historyIsAtBottom = () => {
-    const layer = historyLayerRef.current;
-    if (!layer) return true;
-    return layer.scrollHeight - layer.scrollTop - layer.clientHeight < 24;
+    let timer = 0;
+    const updateKeyboardAccessory = () => {
+      const viewport = window.visualViewport;
+      const viewportHeight = viewport?.height ?? window.innerHeight;
+      const viewportOffset = viewport?.offsetTop ?? 0;
+      initialViewportHeightRef.current = Math.max(initialViewportHeightRef.current, window.innerHeight, viewportHeight);
+      const viewportBottomInset = viewport ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop) : 0;
+      const heightLossInset = Math.max(0, initialViewportHeightRef.current - viewportHeight - viewportOffset);
+      const bottom = Math.max(viewportBottomInset, heightLossInset);
+      document.documentElement.style.setProperty("--terminal-keybar-bottom", `${bottom}px`);
+      setKeyboardOpen(bottom > 80 && !composeOpenRef.current);
+    };
+
+    const scheduleUpdate = () => {
+      window.clearTimeout(timer);
+      updateKeyboardAccessory();
+      timer = window.setTimeout(updateKeyboardAccessory, 180);
+    };
+
+    scheduleUpdate();
+    window.addEventListener("resize", scheduleUpdate);
+    window.addEventListener("focusin", scheduleUpdate);
+    window.addEventListener("focusout", scheduleUpdate);
+    window.visualViewport?.addEventListener("resize", scheduleUpdate);
+    window.visualViewport?.addEventListener("scroll", scheduleUpdate);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("resize", scheduleUpdate);
+      window.removeEventListener("focusin", scheduleUpdate);
+      window.removeEventListener("focusout", scheduleUpdate);
+      window.visualViewport?.removeEventListener("resize", scheduleUpdate);
+      window.visualViewport?.removeEventListener("scroll", scheduleUpdate);
+      document.documentElement.style.removeProperty("--terminal-keybar-bottom");
+    };
+  }, [useMobileInput, composeOpen]);
+
+  const setCtrlMode = (active: boolean) => {
+    ctrlActiveRef.current = active;
+    setCtrlActive(active);
   };
 
-  const scrollHistoryToBottom = () => {
-    window.requestAnimationFrame(() => {
-      const layer = historyLayerRef.current;
-      if (layer) layer.scrollTop = layer.scrollHeight;
-    });
+  const applyCtrlModifier = (data: string): string => {
+    if (!ctrlActiveRef.current || !data) return data;
+    setCtrlMode(false);
+    const first = data[0];
+    const lower = first.toLowerCase();
+    let mapped = "";
+    if (lower >= "a" && lower <= "z") {
+      mapped = String.fromCharCode(lower.charCodeAt(0) - 96);
+    } else {
+      mapped = {
+        " ": "\x00",
+        "@": "\x00",
+        "[": "\x1b",
+        "\\": "\x1c",
+        "]": "\x1d",
+        "^": "\x1e",
+        "_": "\x1f",
+        "?": "\x7f",
+      }[first] || first;
+    }
+    return `${mapped}${data.slice(1)}`;
   };
-
-  const loadHistory = useCallback(async (forceBottom = false) => {
-    const followBottom = forceBottom || historyIsAtBottom();
-    try {
-      const payload = await fetchJson<{ text: string }>(`/api/tmux/capture?session=${encodeURIComponent(session)}&lines=8000`);
-      setHistoryText(payload.text || "");
-      if (followBottom) scrollHistoryToBottom();
-    } catch (err) {
-      setHistoryText(err instanceof Error ? err.message : String(err));
-    }
-  }, [session]);
-
-  const openHistory = useCallback((forceBottom = true) => {
-    if (selectionMode) return;
-    if (composeOpenRef.current) {
-      composeOpenRef.current = false;
-      setComposeOpen(false);
-    }
-    historyOpenRef.current = true;
-    setHistoryOpen(true);
-    loadHistory(forceBottom);
-  }, [loadHistory, selectionMode]);
-
-  const closeHistory = useCallback(() => {
-    historyOpenRef.current = false;
-    setHistoryOpen(false);
-    terminalRef.current?.scrollToBottom();
-  }, []);
-
-  useEffect(() => {
-    if (!historyOpen) return;
-    const timer = window.setInterval(() => loadHistory(false), 1800);
-    return () => window.clearInterval(timer);
-  }, [historyOpen, loadHistory]);
 
   useEffect(() => {
     if (!composeOpen) return;
@@ -605,7 +622,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     let heartbeatTimer = 0;
     const terminal = new Terminal({
       cursorBlink: true,
-      disableStdin: useMobileInput,
+      disableStdin: false,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
       fontSize: 12,
       lineHeight: 1.15,
@@ -621,9 +638,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     terminal.loadAddon(fitAddon);
     terminal.open(terminalHost.current);
     fitAddon.fit();
-    if (!useMobileInput) {
-      terminal.focus();
-    }
+    terminal.focus();
 
     const initialDimensions = fitAddon.proposeDimensions();
     const initialCols = initialDimensions?.cols || terminal.cols || 80;
@@ -635,7 +650,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     const connectSocket = () => {
       if (disposed) return;
       setStatus(socketRef.current ? "Reconnecting" : "Connecting");
-      const nextSocket = new WebSocket(`${protocol}://${window.location.host}/api/tmux/attach?session=${encodeURIComponent(session)}&cols=${initialCols}&rows=${initialRows}`);
+      const nextSocket = new WebSocket(`${protocol}://${window.location.host}/api/terminal/attach?session=${encodeURIComponent(session)}&cols=${initialCols}&rows=${initialRows}`);
       socketRef.current = nextSocket;
 
       nextSocket.addEventListener("open", () => {
@@ -669,7 +684,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     const dataDisposable = terminal.onData((data) => {
       const socket = socketRef.current;
       if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "input", data }));
+        socket.send(JSON.stringify({ type: "input", data: applyCtrlModifier(data) }));
       }
     });
     const resizeDisposable = terminal.onResize((size) => {
@@ -701,7 +716,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       socketRef.current?.close();
       terminal.dispose();
     };
-  }, [session, useMobileInput]);
+  }, [session]);
 
   const sendStableTerminalSize = () => {
     fitTerminal(true);
@@ -745,7 +760,6 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
 
   const focusTerminal = () => {
     if (selectionMode) return;
-    if (useMobileInput) return;
     terminalRef.current?.focus();
   };
 
@@ -766,7 +780,6 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       focusComposerInput();
       return;
     }
-    closeHistory();
     composeOpenRef.current = true;
     terminalRef.current?.scrollToBottom();
     flushSync(() => {
@@ -827,7 +840,6 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   };
 
   const sendEnter = () => {
-    closeHistory();
     terminalRef.current?.scrollToBottom();
     sendInput("\r");
     composeTextRef.current = "";
@@ -875,11 +887,8 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   };
 
   const handleTerminalWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (selectionMode || !historyOpenRef.current) return;
-    if (Math.abs(event.deltaY) < 4) return;
-    event.preventDefault();
-    const layer = historyLayerRef.current;
-    if (layer) layer.scrollTop += event.deltaY;
+    if (selectionMode || Math.abs(event.deltaY) < 4) return;
+    terminalRef.current?.scrollLines(Math.round(event.deltaY / 14));
   };
 
   const handleMobilePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -891,12 +900,20 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     }
   };
 
-  const toggleHistory = () => {
-    if (historyOpenRef.current) {
-      closeHistory();
-      return;
-    }
-    openHistory(true);
+  const sendTerminalKey = (data: string) => {
+    sendInput(data);
+    terminalRef.current?.focus();
+  };
+
+  const handleKeyPointerDown = (event: React.PointerEvent<HTMLButtonElement>, data: string) => {
+    event.preventDefault();
+    sendTerminalKey(data);
+  };
+
+  const toggleCtrlKey = (event: React.PointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    setCtrlMode(!ctrlActiveRef.current);
+    terminalRef.current?.focus();
   };
 
   const toggleSelectionMode = () => {
@@ -907,7 +924,6 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       return;
     }
     closeComposer(false);
-    closeHistory();
     setSelectionText(terminalBufferText(terminal));
     setSelectionMode(true);
   };
@@ -929,14 +945,36 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
               Text
             </button>
           )}
-          <button className={`source-button ${historyOpen ? "active" : ""}`} type="button" onClick={toggleHistory}>
-            {historyOpen ? "Live" : "History"}
-          </button>
           <button className={`source-button ${selectionMode ? "active" : ""}`} type="button" onClick={toggleSelectionMode}>
             {selectionMode ? "Live" : "Select"}
           </button>
         </div>
       </header>
+      {keyboardOpen && (
+        <div className="terminal-keybar" aria-label="Terminal keys">
+          <button
+            className={ctrlActive ? "active" : ""}
+            type="button"
+            onPointerDown={toggleCtrlKey}
+          >
+            Ctrl
+          </button>
+          <button type="button" onPointerDown={(event) => handleKeyPointerDown(event, "\x1b")}>Esc</button>
+          <button type="button" onPointerDown={(event) => handleKeyPointerDown(event, "\t")}>Tab</button>
+          <button type="button" aria-label="Left" onPointerDown={(event) => handleKeyPointerDown(event, "\x1b[D")}>
+            <span className="codicon codicon-arrow-left" />
+          </button>
+          <button type="button" aria-label="Up" onPointerDown={(event) => handleKeyPointerDown(event, "\x1b[A")}>
+            <span className="codicon codicon-arrow-up" />
+          </button>
+          <button type="button" aria-label="Down" onPointerDown={(event) => handleKeyPointerDown(event, "\x1b[B")}>
+            <span className="codicon codicon-arrow-down" />
+          </button>
+          <button type="button" aria-label="Right" onPointerDown={(event) => handleKeyPointerDown(event, "\x1b[C")}>
+            <span className="codicon codicon-arrow-right" />
+          </button>
+        </div>
+      )}
       <div className="terminal-live">
         <div
           className="terminal-host"
@@ -945,15 +983,6 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
           onPointerDownCapture={handleMobilePointerDown}
           onWheel={handleTerminalWheel}
         />
-        {historyOpen && (
-          <pre
-            ref={historyLayerRef}
-            className="terminal-history-layer"
-            aria-label="Terminal scrollback"
-          >
-            {historyText || "No terminal history available."}
-          </pre>
-        )}
         {selectionMode && (
           <textarea
             className="terminal-selection-layer"

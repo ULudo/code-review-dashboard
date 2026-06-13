@@ -51,7 +51,9 @@ To invalidate existing browser pairings and create a new token:
 git-review-dashboard --reset-token --host 0.0.0.0 --port 8765
 ```
 
-The app is strictly read-only. It shows a repository file tree, color-codes changed/new/deleted files and folders, and runs read-only Git commands such as `git status`, `git diff`, `git show`, `git ls-files`, and `git rev-parse`.
+The source review UI is read-only. It shows a repository file tree, color-codes changed/new/deleted files and folders, and runs read-only Git commands such as `git status`, `git diff`, `git show`, `git ls-files`, and `git rev-parse`.
+
+The Terminal view can create app-managed shell sessions. These sessions are regular local PTY processes owned by the dashboard server, not tmux sessions. Browser disconnects do not stop them; reconnecting replays the session output buffer and resumes live streaming. The shell itself is not read-only, so commands typed there can modify files just like any local terminal command.
 
 ## Frontend Development
 

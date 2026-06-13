@@ -609,6 +609,45 @@ h2 {
   font-size: 10px;
 }
 
+.terminal-keybar {
+  position: fixed;
+  right: 0;
+  bottom: var(--terminal-keybar-bottom, 0);
+  left: 0;
+  z-index: 19;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  min-height: 31px;
+  padding: 3px 5px;
+  overflow-x: auto;
+  border-top: 1px solid var(--line);
+  background: #252526;
+  -webkit-overflow-scrolling: touch;
+}
+
+.terminal-keybar button {
+  flex: 0 0 auto;
+  min-width: 34px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #333333;
+  color: var(--text);
+  font: 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  touch-action: manipulation;
+}
+
+.terminal-keybar button.active {
+  border-color: var(--blue);
+  background: #094771;
+}
+
+.terminal-keybar .codicon {
+  font-size: 13px;
+}
+
 .terminal-session-panel {
   display: flex;
   flex: 1;
@@ -734,27 +773,6 @@ h2 {
   overflow-y: scroll !important;
   touch-action: pan-y;
   -webkit-overflow-scrolling: touch;
-}
-
-.terminal-history-layer {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  margin: 0;
-  padding: 0 0 8px;
-  overflow: auto;
-  overscroll-behavior: contain;
-  background: #1e1e1e;
-  color: #d4d4d4;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 1.15;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  touch-action: pan-y;
-  -webkit-overflow-scrolling: touch;
-  user-select: text;
-  -webkit-user-select: text;
 }
 
 .terminal-selection-layer {
