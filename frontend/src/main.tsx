@@ -498,6 +498,8 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   const composeTextRef = useRef("");
   const ctrlActiveRef = useRef(false);
   const initialViewportHeightRef = useRef(window.innerHeight);
+  const lastTerminalTouchYRef = useRef<number | null>(null);
+  const keyboardOpenRef = useRef(false);
   const useMobileInput = useMemo(() => window.matchMedia("(pointer: coarse)").matches, []);
   const [status, setStatus] = useState("Connecting");
   const [ctrlActive, setCtrlActive] = useState(false);
@@ -531,6 +533,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
 
     let timer = 0;
     const updateKeyboardAccessory = () => {
+      const keybarHeight = 32;
       const viewport = window.visualViewport;
       const viewportHeight = viewport?.height ?? window.innerHeight;
       const viewportOffset = viewport?.offsetTop ?? 0;
@@ -538,8 +541,18 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       const viewportBottomInset = viewport ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop) : 0;
       const heightLossInset = Math.max(0, initialViewportHeightRef.current - viewportHeight - viewportOffset);
       const bottom = Math.max(viewportBottomInset, heightLossInset);
+      const isKeyboardOpen = bottom > 80 && !composeOpenRef.current;
+      const terminalHeight = isKeyboardOpen ? Math.max(180, viewportHeight + viewportOffset - keybarHeight) : window.innerHeight;
       document.documentElement.style.setProperty("--terminal-keybar-bottom", `${bottom}px`);
-      setKeyboardOpen(bottom > 80 && !composeOpenRef.current);
+      document.documentElement.style.setProperty("--terminal-height", `${terminalHeight}px`);
+      keyboardOpenRef.current = isKeyboardOpen;
+      setKeyboardOpen(isKeyboardOpen);
+      window.setTimeout(() => {
+        if (!composeOpenRef.current) {
+          sendStableTerminalSize();
+          terminalRef.current?.scrollToBottom();
+        }
+      }, 40);
     };
 
     const scheduleUpdate = () => {
@@ -562,6 +575,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
       window.visualViewport?.removeEventListener("resize", scheduleUpdate);
       window.visualViewport?.removeEventListener("scroll", scheduleUpdate);
       document.documentElement.style.removeProperty("--terminal-keybar-bottom");
+      keyboardOpenRef.current = false;
     };
   }, [useMobileInput, composeOpen]);
 
@@ -725,7 +739,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
   useEffect(() => {
     let resizeTimer = 0;
     const updateViewportHeight = () => {
-      if (composeOpenRef.current) return;
+      if (composeOpenRef.current || keyboardOpenRef.current) return;
       document.documentElement.style.setProperty("--terminal-height", `${window.innerHeight}px`);
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
@@ -750,6 +764,7 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
     schedule.forEach((delay) => {
       window.setTimeout(() => {
         if (!composeOpenRef.current) {
+          if (keyboardOpenRef.current) return;
           document.documentElement.style.setProperty("--terminal-height", `${window.innerHeight}px`);
           sendStableTerminalSize();
           terminalRef.current?.scrollToBottom();
@@ -888,7 +903,31 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
 
   const handleTerminalWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     if (selectionMode || Math.abs(event.deltaY) < 4) return;
+    event.preventDefault();
     terminalRef.current?.scrollLines(Math.round(event.deltaY / 14));
+  };
+
+  const handleTerminalTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (selectionMode) return;
+    lastTerminalTouchYRef.current = event.touches[0]?.clientY ?? null;
+  };
+
+  const handleTerminalTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (selectionMode) return;
+    const currentY = event.touches[0]?.clientY;
+    const previousY = lastTerminalTouchYRef.current;
+    if (currentY == null || previousY == null) return;
+    const delta = currentY - previousY;
+    if (Math.abs(delta) < 8) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const lines = Math.max(1, Math.min(20, Math.round(Math.abs(delta) / 7)));
+    terminalRef.current?.scrollLines(delta > 0 ? -lines : lines);
+    lastTerminalTouchYRef.current = currentY;
+  };
+
+  const handleTerminalTouchEnd = () => {
+    lastTerminalTouchYRef.current = null;
   };
 
   const handleMobilePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -982,6 +1021,10 @@ function AttachedTerminal({ session, onBack, onSource }: { session: string; onBa
           onClick={focusTerminal}
           onPointerDownCapture={handleMobilePointerDown}
           onWheel={handleTerminalWheel}
+          onTouchStart={handleTerminalTouchStart}
+          onTouchMove={handleTerminalTouchMove}
+          onTouchEnd={handleTerminalTouchEnd}
+          onTouchCancel={handleTerminalTouchEnd}
         />
         {selectionMode && (
           <textarea

@@ -751,7 +751,7 @@ h2 {
   min-height: 0;
   padding: 0;
   overflow: hidden;
-  touch-action: pan-y;
+  touch-action: none;
   -webkit-tap-highlight-color: transparent;
   -webkit-touch-callout: none;
 }
@@ -771,7 +771,7 @@ h2 {
 
 .terminal-host .xterm-viewport {
   overflow-y: scroll !important;
-  touch-action: pan-y;
+  touch-action: none;
   -webkit-overflow-scrolling: touch;
 }
 
